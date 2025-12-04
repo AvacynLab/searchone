@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 15 17% 10%;
+  --foreground: 0 0% 98%;
+  --card: 222 47% 11%;
+  --card-foreground: 0 0% 98%;
+  --muted: 215 16% 26%;
+  --muted-foreground: 215 16% 75%;
+  --border: 215 20% 20%;
+  --primary: 142 71% 45%;
+  --primary-foreground: 0 0% 10%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+.btn-primary {
+  @apply inline-flex items-center justify-center rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-[color:hsl(var(--primary-foreground))] shadow hover:opacity-90 transition;
+}
+
+.btn-secondary {
+  @apply inline-flex items-center justify-center rounded-xl bg-muted px-3 py-2 text-xs font-semibold text-foreground hover:opacity-90 transition;
+}
+
+.btn-ghost {
+  @apply inline-flex items-center justify-center rounded-xl px-3 py-2 text-sm text-foreground transition;
+  background: transparent;
+}
+.scroll-area {
+  @apply h-full w-full overflow-hidden;
+}
+.scroll-bar {
+  @apply flex select-none touch-none p-0.5 bg-transparent transition-colors duration-150 ease-out;
+}
+.scroll-thumb {
+  @apply flex-1 rounded-full bg-muted;
+}
+
+.bg-card {
+  background: hsl(var(--card));
+}
+.bg-background {
+  background: hsl(var(--background));
+}
+.text-muted-foreground {
+  color: hsl(var(--muted-foreground));
+}
+.text-foreground {
+  color: hsl(var(--foreground));
+}
+.bg-muted {
+  background: hsl(var(--muted));
+}
+.border-border {
+  border-color: hsl(var(--border));
+}
+.bg-primary {
+  background: hsl(var(--primary));
+}
+.text-primary-foreground {
+  color: hsl(var(--primary-foreground));
+}

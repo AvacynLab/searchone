@@ -1,0 +1,38 @@
+{
+  "model_profiles": {
+    "brain": {
+      "prefer": ["anthropic/claude-3.5-sonnet", "openai/gpt-4.1"],
+      "fallback": ["openai/gpt-4o"]
+    },
+    "fast": {
+      "prefer": ["openai/gpt-4o-mini", "google/gemini-flash-1.5"],
+      "fallback": ["mistralai/mistral-small"]
+    },
+    "code": {
+      "prefer": ["deepseek/deepseek-coder", "openai/gpt-4.1"],
+      "fallback": []
+    }
+  },
+  "role_models": {
+    "Explorer": "fast",
+    "Curator": "fast",
+    "Analyst": "brain",
+    "Hypothesis": "brain",
+    "Experimenter": "code",
+    "Coordinator": "brain",
+    "Redacteur": "brain"
+  },
+  "sampling": {
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "max_tokens": 512
+  },
+  "timeouts": {
+    "llm_timeout": 20,
+    "tool_timeout": 10
+  },
+  "logging": {
+    "level": "INFO",
+    "destination": "stdout"
+  }
+}

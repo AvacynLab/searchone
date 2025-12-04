@@ -1,0 +1,42 @@
+# SearXNG settings - SearchOne
+
+# On garde les settings par défaut, mais on limite les engines à un petit set
+# que l'on contrôle, pour éviter les erreurs d'initialisation.
+use_default_settings:
+  engines:
+    keep_only:
+      - duckduckgo
+      - brave
+      - wikipedia
+      - wikidata
+
+general:
+  debug: false
+  instance_name: "SearchOne SearxNG"
+  enable_metrics: false
+  contact_url: "mailto:admin@example.com"
+
+server:
+  secret_key: "Zq8Wm3Hf9P4sKd7Lx2Vb6Rn1Ty5Gj0Cu8Az4Ns9Qw3Er6Ui1Op7"
+  limiter: false              # pas de rate-limit agressif côté SearXNG
+  image_proxy: true
+  bind_address: "0.0.0.0"
+  port: 8080                  # mappe 2003 -> 8080 dans Docker si besoin
+
+search:
+  safe_search: 1              # 0: aucun, 1: modéré, 2: strict
+  default_lang: "fr"
+  formats:
+    - html
+    - json
+
+redis:
+  url: "redis://redis:6379/1" # garde redis tant que tu n'as pas de valkey
+
+ui:
+  default_locale: "fr"
+
+outgoing:
+  request_timeout: 8.0
+  max_request_timeout: 15.0
+  useragent_suffix: "SearchOne"

@@ -1,0 +1,85 @@
+version: '3.8'
+services:
+  redis:
+    image: redis:7
+    container_name: searchone-redis
+    ports:
+      - '2002:6379'
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searchone-searxng
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:2003/
+      - SEARXNG_REDIS_URL=redis://redis:6379/1
+    ports:
+      - '2003:8080'
+    volumes:
+      - type: bind
+        source: ./searxng/settings.yml
+        target: /etc/searxng/settings.yml
+        read_only: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  backend:
+    build: ./backend
+    container_name: searchone-backend
+    ports:
+      - '2001:2001'
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - SEARXNG_URL=http://searxng:8080
+      # OPENROUTER_API_KEY should be set in your environment or via docker secrets
+    depends_on:
+      redis:
+        condition: service_healthy
+      searxng:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2001/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  worker:
+    build: ./backend
+    container_name: searchone-worker
+    depends_on:
+      redis:
+        condition: service_healthy
+      searxng:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - SEARXNG_URL=http://searxng:8080
+      - OPENROUTER_API_KEY_FILE=/run/secrets/openrouter_api_key
+    command: ["python", "worker.py"]
+    secrets:
+      - openrouter_api_key
+
+  frontend:
+    build: ./frontend
+    container_name: searchone-frontend
+    ports:
+      - '2000:80'
+    depends_on:
+      backend:
+        condition: service_healthy
+
+secrets:
+  openrouter_api_key:
+    external: true
