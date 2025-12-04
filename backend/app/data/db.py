@@ -2,7 +2,7 @@ from sqlmodel import SQLModel, Field, create_engine, Session, select, delete
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 from app.core.config import DB_FILE
-from sqlalchemy import func
+from sqlalchemy import Column, Text, func
 import logging
 from app.core.logging_config import configure_logging
 import json
@@ -29,6 +29,16 @@ class Chunk(SQLModel, table=True):
     chunk_index: int
     text: str
     meta: Optional[str] = None
+
+
+class TabularData(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    document_id: Optional[int] = Field(default=None)
+    table_id: str
+    table_schema: Optional[str] = Field(default=None, sa_column=Column("schema", Text))
+    records: Optional[str] = Field(default=None)
+    table_metadata: Optional[str] = Field(default=None, sa_column=Column("metadata", Text))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class Job(SQLModel, table=True):

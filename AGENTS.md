@@ -1,383 +1,536 @@
-Parfait, on fige l’écart avec le code actuel et on le transforme en checklist “agent-ready”.
-Je te donne une TODO **précise**, par module/fichier, uniquement sur ce qu’il reste à implémenter.
+Parfait, on passe en mode “chef de chantier cosmique”.
+Je vais m’adresser directement à l’agent qui va exécuter les tâches.
 
 ---
 
-## 1. Exposer les plots comme vrai tool LLM (`plot_tool`)
+# TODO global – Étendre SearchOne pour un pipeline de recherche / acquisition / ingestion **SOTA++**
 
-### 1.1. Déclaration du tool
+> Scope : **uniquement** la recherche, l’acquisition, le traitement/structuration, l’ingestion dans la mémoire/graph, et l’utilisation de ces données par les agents.
+> Contraintes : 100 % open-source, aucune API payante, capable de gérer texte / HTML / PDF / tableaux / JSON / images.
 
-**Fichier :** `backend/app/workflows/agents.py`
+Je pars de l’état actuel du projet (SearchOne) tel qu’on l’a audité :
 
-* [x] Ajouter une entrée `plot_tool` dans la liste `TOOLS` :
+* multi-agent + orchestrateur déjà en place,
+* `web_search_tool`, SearxNG, `search_vector` / `search_semantic`,
+* `knowledge_store` + `graph_tools` + `plot_tool`,
+* `writing_pipeline`, `reporting`, `ConvergenceController`, scénarios YAML, etc.
 
-  * [x] `name: "plot_tool"`
-  * [x] `description`: génération de figures à partir de données numériques (courbes, barres, histogrammes…)
-  * [x] `parameters` (JSON schema) :
-
-    * `job_id` (int) – optionnel, sinon dérivé de l’état courant
-    * `series` (array d’objets `{x: [...], y: [...], label: str, yerr?: [...]}`)
-    * `plot_type` (enum: `"line" | "scatter" | "bar" | "hist"`)
-    * `title` (string)
-    * `x_label` / `y_label` (string, optionnel)
-    * champs optionnels : `log_scale`, `bins`, etc., mappés sur `plot_tools.generate_plot`.
-
-### 1.2. Handler du tool
-
-**Fichier :** `backend/app/workflows/agents.py`
-
-* [x] Dans la fonction qui exécute les tools (l’équivalent de `_execute_tool(name, args, agent, state, ...)`) :
-
-  * [x] Ajouter un branchement `if name == "plot_tool":`
-
-    * [x] Valider les arguments (`series`, `plot_type`, etc.).
-    * [x] Appeler `generate_plot` de `backend/app/services/plot_tools.py` :
-
-      * [x] `from app.services.plot_tools import generate_plot`
-      * [x] `artifact = generate_plot(data=..., spec=...)`
-    * [x] Construire un objet `evidence` avec :
-
-      * `content`: courte description de ce que représente la figure
-      * `meta`: inclure au minimum :
-
-        * `"figure": {"path": artifact.path, "svg_path": artifact.svg_path, "title": ..., "plot_type": ...}`
-        * `"source_type": "plot"`
-    * [x] Ajouter cette evidence dans `state["evidence"]` ou équivalent.
-
-### 1.3. Rattacher aux rôles
-
-**Fichier :** `backend/app/workflows/agents.py`
-
-* [x] Mettre à jour `ROLE_ALLOWED_TOOLS` :
-
-  * [x] Autoriser `"plot_tool"` pour :
-
-    * `Analyst`
-    * `Experimenter`
-    * `Redacteur` (pour demander des figures pour l’article).
-
-### 1.4. Intégration à la pipeline d’écriture
-
-**Fichiers :**
-
-* `backend/app/workflows/writing_pipeline.py`
-
-* `backend/app/services/reporting.py`
-
-* [x] Vérifier/adapter `_collect_figures(state)` :
-
-  * [x] S'assurer qu'il récupère bien les `evidence.meta["figure"]` produites par `plot_tool`.
-  * [x] Si besoin, enrichir la structure `figure` : `caption`, `variables`, `source`.
-
-* [x] Dans `build_scientific_article(...)` :
-
-  * [x] S'assurer que la clé `figures` du résultat contient bien toutes les figures générées par `plot_tool`.
-  * [ ] Option : ajouter une section “Liste des figures” dans le Markdown/LaTeX.
-
-### 1.5. Tests
-
-**Fichier :** `backend/tests/test_plot_tools.py` (et/ou nouveau fichier)
-
-* [x] Ajouter un test d’intégration tool :
-
-  * [x] Simuler un appel tool-calling `"plot_tool"` via la fonction d’exécution de tool.
-  * [x] Vérifier que :
-
-    * [x] `generate_plot` est bien appelé (mock)
-    * [x] `state["evidence"]` contient une entrée avec `meta["figure"]` valide.
-* [x] Ajouter un test `test_article_includes_figures` :
-
-  * [x] Construire un `state` minimal contenant une evidence avec `meta["figure"]`.
-  * [x] Appeler `build_scientific_article(...)`.
-* [x] Vérifier que `result["figures"]` n’est pas vide et que la figure y est bien.
-
-## Progress log
-- [2025-12-04] Registered `plot_tool` in `TOOLS`, enforced role permissions, extended `_execute_tool` to generate figures, and surfaced plot metadata through `_collect_figures`.
-- [2025-12-04] Added integration tests covering `plot_tool` execution and `build_scientific_article`, then ran `pytest backend/tests/test_plot_tools.py`.
-- [2025-12-04] Added `knowledge_graph_tool`, state tracking, and charges to `ROLE_ALLOWED_TOOLS` plus reporting/writing adjustments for stats/exports.
-- [2025-12-04] Added `test_graph_tools.py` (tool + reporting), verified `knowledge_graph` summary, and ran `pytest backend/tests/test_graph_tools.py`.
-- [2025-12-04] Implemented phase `tool_allowlist`, blocked unauthorized tools with a descriptive tool result, and covered the behavior via `backend/tests/test_tool_allowlist.py`.
-- [2025-12-04] Ensured `configs/research_scenarios.yaml` only lists existing tools, added runtime validation/test coverage, and confirmed `backend/tests/test_scenarios.py`.
-- [2025-12-04] Updated top-level tests to use `app.*` imports and verified `tests/test_functional_modules.py`, `tests/test_e2e_placeholders.py`, `tests/test_convergence.py` via pytest.
-- [2025-12-04] Documented `plot_tool`/`knowledge_graph_tool` in `README_RESEARCH.md` and added an illustrative scenario example that showcases both tools.
+Les tâches ci-dessous sont **ce qu’il faut rajouter / renforcer** par dessus.
 
 ---
 
-## 2. Intégrer `graph_tools` comme `knowledge_graph_tool` + stats dans le rapport
+## 1. Créer un “cerveau de recherche” dédié : `search_oracle`
 
-### 2.1. Tool LLM `knowledge_graph_tool`
+Objectif : encapsuler toute la logique de recherche (tiers de sources, budget, structuration des résultats) dans un module unique, utilisé par les agents au lieu d’appeler directement SearxNG ou `search_vector`.
+
+### 1.1. Nouveau module `backend/app/services/search_oracle.py`
+
+* [x] Créer le fichier `backend/app/services/search_oracle.py` avec la structure suivante :
+
+  * [x] `class SearchSessionState`:
+
+    * attributs :
+
+      * `job_id: int`
+      * `root_query: str`
+      * `subqueries: List[Dict[str, Any]]` (texte, statut, coverage, sources)
+      * `used_budget: Dict[str, int]` (par tier : `internal`, `api`, `web`)
+      * `evidence_ids: List[str]` (référence aux entries de `knowledge_store` / DB)
+      * `gaps: List[str]` (angles encore peu couverts)
+  * [x] Fonctions de haut niveau :
+
+    * `plan_subqueries(root_query: str) -> List[str)`
+      (décomposition LLM ou heuristique en sous-questions)
+    * `search_internal(session: SearchSessionState, subquery: str) -> List[Evidence]`
+      (appelle `search_vector`, `search_semantic` sur DB interne)
+    * `search_web_via_searx(session: SearchSessionState, subquery: str) -> List[Evidence]`
+      (wrapppe `web_search_tool` + respect budgets / circuit breaker existant)
+    * `enrich_knowledge_store(evidences) -> List[str]`
+      (stocke dans `knowledge_store`, retourne les IDs)
+    * `update_coverage(session, subquery, evidences) -> None`
+      (calcul de coverage/gaps par sous-question)
+
+### 1.2. Tool LLM `search_oracle_tool`
+
+* [x] Dans `backend/app/workflows/agents.py` :
+
+  * [x] Ajouter un tool dans `TOOLS` :
+
+    * `name: "search_oracle_tool"`
+    * `description`: “Planifie et exécute une recherche multi-sources (mémoire interne + web via SearxNG), retourne un panorama structuré d’évidences et de gaps.”
+    * `parameters` :
+
+      * `query: string` (obligatoire)
+      * `max_depth: integer` (optionnel)
+      * `focus: string` (optionnel, ex. "recent", "theorique", "applications")
+  * [x] Dans `_execute_tool`, branchement :
+
+    * [x] Appeler `SearchSessionState(job_id=...)`
+    * [x] `subqueries = plan_subqueries(query)`
+    * [x] Pour chaque sous-query :
+
+      * [x] `search_internal(...)`
+      * [x] si coverage insuffisant → `search_web_via_searx(...)` (respect budget)
+      * [x] `enrich_knowledge_store(...)`
+      * [x] `update_coverage(...)`
+    * [x] Retourner au LLM :
+
+      * résumé des sous-questions
+      * pour chaque : liste d’évidences (titres, types de source, snippets)
+      * `gaps` identifiés
+
+### 1.3. Intégration scénarios & rôles
+
+* [x] Mettre à jour `configs/research_scenarios.yaml` :
+
+  * [x] Pour les phases de “recherche large”, préférer `search_oracle_tool` aux appels bruts `web_search_tool`.
+* [x] Dans `ROLE_ALLOWED_TOOLS` :
+
+  * [x] Autoriser `search_oracle_tool` pour :
+
+    * `Explorer`, `Researcher`, `SourceHunterEconTech`
+  * [x] Facultatif : interdire `web_search_tool` direct pour certains rôles, pour forcer le passage par l’oracle.
+
+---
+
+## 2. Pipeline d’ingestion multi-format avancée
+
+Objectif : ingestion robuste de **HTML, PDF, tableaux, JSON, images** dans une forme exploitable.
+
+### 2.1. HTML / pages web
+
+**Fichier(s) cible(s) :** `backend/app/services/ingest.py` (existe déjà), nouveau `backend/app/services/html_parser.py`
+
+* [x] Créer `backend/app/services/html_parser.py` :
+
+  * [x] Fonction `clean_html(html: str) -> str` :
+
+    * supprimer menus, footer, nav, pubs (tags classiques : `<nav>`, `<footer>`, `<aside>`, etc.)
+    * désactiver scripts/styles.
+  * [x] Fonction `html_to_markdown(html: str) -> str` :
+
+    * utiliser une lib (ex. `markdownify`, si acceptable) ou fallback maison simple.
+  * [x] Fonction `extract_main_content(html: str) -> Dict[str, Any]` :
+
+    * heuristiques : densité de texte, longueur des blocs, titre, sous-titres.
+    * retourne : `{"title": ..., "sections": [...], "links": [...], "raw_html": ...}`.
+
+* [x] Adapter `ingest.py` :
+
+  * [x] Lorsque l’on ingère une URL :
+
+    * utiliser `html_parser.extract_main_content`
+    * découper en `chunks` structurés (par section `<h1>/<h2>/paragraphes`)
+    * passer ces chunks à la logique d’indexation / `vector_store`.
+
+### 2.2. PDF et documents
+
+**Fichier(s) cible(s) :** nouveau `backend/app/services/pdf_parser.py`, `ingest.py`
+
+* [x] Créer `backend/app/services/pdf_parser.py` :
+
+  * [x] Utiliser une lib open-source (`fitz`/PyMuPDF ou `pdfminer`) pour :
+
+    * extraire le texte paginé
+    * récupérer les métadonnées (titre, auteurs, date si dispo)
+  * [x] Détecter les **tableaux** dans le texte (pattern lignes/colonnes, séparateurs) :
+
+    * extraire chaque tableau comme objet structuré (liste de lignes / colonnes)
+    * associer un identifiant de tableau.
+  * [x] Retourner une structure :
+
+    ```python
+    {
+      "full_text": "...",
+      "pages": [...],
+      "tables": [...],
+      "metadata": {...},
+    }
+    ```
+
+* [x] Dans `ingest.py` :
+
+  * [x] Si le fichier est PDF :
+
+    * appeler `pdf_parser.parse(...)`
+    * ingérer le texte comme chunks (sections par page / titre)
+    * stocker les métadonnées en DB (`Document` / `Chunk`)
+    * marquer les tables pour ingestion spéciale (voir 2.3).
+
+### 2.3. Tableaux & données structurées
+
+**Fichier(s) cible(s) :** nouveau `backend/app/services/table_parser.py`, `ingest.py`
+
+* [x] Créer `backend/app/services/table_parser.py` :
+
+  * [x] Fonctions :
+
+    * `infer_schema(table) -> Dict[str, Any]` :
+
+      * détecter les types de colonnes (numérique, catégorielle, date…)
+      * essayer de deviner les unités / signification (via patterns + LLM si dispo).
+    * `table_to_records(table, schema) -> List[Dict[str, Any]]` :
+
+      * normaliser en JSON lignes.
+  * [x] Option : exposer un outil `table_summary` pour l’agent `Analyst`.
+
+* [x] Adapter `ingest.py` :
+
+  * [x] Lorsqu’un tableau est détecté (CSV, Excel, table PDF) :
+
+    * passer par `table_parser.infer_schema`
+    * stocker les `records` dans une table dédiée en DB (ex. `TabularData`).
+
+---
+
+## 3. Structuration sémantique : entités, relations, graph enrichi
+
+Objectif : passer de “texte + embeddings” à un **graphe de connaissance riche**, alimenté par de la NER + relation extraction.
+
+### 3.1. Module de structuration NLP
+
+**Fichier :** nouveau `backend/app/services/nlp_structuring.py`
+
+* [x] Créer un module capable de fonctionner **sans API externe** :
+
+  * [x] `extract_entities(text: str) -> List[Dict]` :
+
+    * utiliser bibliothèque NLP open-source (ex. spaCy FR/EN) ou modèle local.
+    * renvoyer : `{"text": "supraconductivité", "label": "CONCEPT", "span": [i, j]}`…
+  * [x] `extract_relations(text: str, entities) -> List[Dict]` :
+
+    * heuristiques + modèle léger si possible (relation “part_of”, “causes”, “uses”, etc.)
+  * [x] `normalize_entities(entities) -> List[Dict]` :
+
+    * tentative de mapping vers des IDs connus (via Wikidata dump local ou heuristiques : lowercasing, lemmatisation).
+
+### 3.2. Intégration au `knowledge_store`
+
+**Fichier :** `backend/app/data/knowledge_store.py`
+
+* [x] Étendre la structure des `claims` :
+
+  * [x] ajouter champs :
+
+    * `entities: List[EntityRef]` (avec type + ID éventuel)
+    * `relations: List[RelationRef]`
+    * `source_doc_id`, `chunk_id`.
+* [x] Ajouter une fonction :
+
+  * [x] `store_structured_knowledge(claims, entities, relations, source_meta)` :
+
+    * insère dans les fichiers JSONL existants (ou dans une table DB, si déjà présente),
+    * ajoute des entries dans une table `KnowledgeGraphNodes` / `KnowledgeGraphEdges` si tu passes par la DB.
+
+### 3.3. Enrichir `graph_tools`
+
+**Fichier :** `backend/app/services/graph_tools.py`
+
+* [x] Compléter la génération de graphe :
+
+  * [x] inclure les **entités** comme nœuds typés (concept, personne, lieu, variable, méthode…)
+  * [x] créer des arêtes “mentionné dans” (entité → document/claim)
+  * [x] créer des arêtes pour les relations extraites.
+* [x] Ajouter des fonctions de requête :
+
+  * [x] `find_hubs(graph, top_k=10)` (entités les plus connectées)
+  * [x] `subgraph_for_topic(topic: str)` (filtre les nœuds pertinents pour un thème).
+
+---
+
+## 4. Validation multi-source & fact-checking
+
+Objectif : qu’aucune affirmation importante ne soit présentée sans **validation explicable**.
+
+### 4.1. Tool `fact_check_tool`
 
 **Fichier :** `backend/app/workflows/agents.py`
 
-* [x] Ajouter une entrée `knowledge_graph_tool` dans `TOOLS` :
+* [x] Ajouter un tool `fact_check_tool` :
 
-  * [x] `name: "knowledge_graph_tool"`
-  * [x] `description`: construit un graphe de connaissances basé sur les claims, sources et pollution actuelle, calcule des stats, exporte un visuel.
   * [x] `parameters` :
 
-    * `job_id` (int, optionnel)
-    * `scope` (`"current_job"` | `"global"`) – optionnel.
+    * `claim: string`
+    * `context_ids: List[str]` (optional – IDs d’evidence du knowledge_store)
+  * [x] Dans `_execute_tool` :
 
-* [x] Dans le handler de tools :
+    * [x] Pipeline :
 
-  * [x] Ajouter un branchement `if name == "knowledge_graph_tool":`
+      1. **Décomposition** : demander au LLM de découper `claim` en sous-assertions simples.
+      2. **Recherche d’évidences internes** :
 
-    * [x] Appeler `build_knowledge_graph(job_id=...)` de `app.services.graph_tools`.
-    * [x] Appeler `graph_stats(graph)` pour les métriques.
-    * [x] Appeler `export_graphviz(graph, job_id, fmt="png")`.
-    * [x] Mettre à jour `state` :
+         * via `search_semantic` / `search_vector` sur les documents existants.
+      3. **Recherche web conditionnelle** (si coverage interne faible) :
 
-      * [x] `state["knowledge_graph_stats"] = stats`
-      * [x] `state.setdefault("knowledge_graph_exports", []).append({"format": "png", "path": ..., "created_at": ...})`
-    * [x] Retourner un “tool result” lisible :
+         * via `search_oracle_tool` / `web_search_tool` (en respectant budgets).
+      4. **Croisement** : pour chaque sous-assertion, classifier en :
 
-      * résumé textuel des stats (nombre de nœuds, densité, hubs, etc.)
-      * chemin du fichier PNG, si utile à l’agent.
+         * `supported`, `contradicted`, `uncertain`.
+      5. **Synthèse** : produire un verdict global + explication.
 
-* [x] Mise à jour de `ROLE_ALLOWED_TOOLS` :
+    * [x] Stocker le résultat dans `knowledge_store` :
 
-  * [x] Autoriser `knowledge_graph_tool` pour :
+      * nouveau type d’entry “fact_check” avec :
 
-    * `Analyst`
-    * `Coordinator`
-    * `Critic`
+        * `claim`, `subclaims`, `verdict`, `supporting_sources`, `contradicting_sources`.
 
-### 2.2. Intégration reporting & writing
+* [x] Autoriser ce tool pour les rôles :
+
+  * `FactChecker`, `Critic`, `Analyst`.
+
+### 4.2. Intégration au scoring & reporting
+
+**Fichiers :** `backend/app/services/research_score.py`, `backend/app/services/reporting.py`
+
+* [x] Adapter `ResearchScore.update(...)` :
+
+  * [x] inclure un facteur `fact_check_pass_rate` (proportion de claims importants validés).
+* [x] Dans `reporting.build_structured_summary(job_state)` :
+
+  * [x] ajouter un volet “validation” :
+
+    * liste des claims fact-checkés avec verdict
+    * marquer ceux “uncertain” / “controversial”.
+
+---
+
+## 5. Gestion des contradictions & controverses
+
+Objectif : modéliser explicitement les zones où les sources ne sont pas d’accord.
+
+### 5.1. Extension du modèle de claim
+
+**Fichier :** `backend/app/data/knowledge_store.py`
+
+* [x] Ajouter un champ `status` aux claims :
+
+  * valeurs possibles : `"supported"`, `"refuted"`, `"controversial"`, `"unknown"`.
+* [x] Ajouter un champ `support_evidence_ids` et `refute_evidence_ids`.
+
+### 5.2. Tool `resolve_conflicts_tool`
+
+**Fichier :** `backend/app/workflows/agents.py`
+
+* [x] Définir un tool :
+
+  * `name: "resolve_conflicts_tool"`
+  * `parameters` :
+
+    * `claim_id: string`
+  * [x] Handler :
+
+    * [x] Récupérer le claim + ses evidences via `knowledge_store`.
+    * [x] Demander au LLM de :
+
+      * comparer les sources,
+      * estimer un verdict (support/refute/controversial),
+      * proposer une formulation prudente.
+    * [x] Mettre à jour `claim.status` et les listes de `support_evidence_ids` / `refute_evidence_ids`.
+
+* [x] Autoriser pour `Critic`, `Coordinator`.
+
+### 5.3. Reporting
 
 **Fichier :** `backend/app/services/reporting.py`
 
-* [x] Dans `build_structured_summary(job_state)` :
+* [x] Ajouter une section “Controverses et désaccords” :
 
-  * [x] Récupérer :
-
-    * `kg_stats = job_state.get("knowledge_graph_stats", {})`
-    * `kg_exports = job_state.get("knowledge_graph_exports", [])`
-  * [x] Ajouter une section dans le résumé structuré :
-
-    * “Topologie du graphe de connaissances”
-    * Inclure quelques chiffres clés : `nodes`, `edges`, `components`, `top_hubs`, etc.
-  * [x] Ajouter un champ optionnel dans la structure retournée :
-
-    * `summary["knowledge_graph"] = {"stats": kg_stats, "exports": kg_exports}`
-
-**Fichier :** `backend/app/workflows/writing_pipeline.py`
-
-* [x] Dans `build_scientific_article(...)` :
-
-  * [x] Si `state["knowledge_graph_stats"]` existe :
-
-    * Ajouter un paragraphe dans la section Discussion ou Méthodes :
-
-      * “Structure du graphe de connaissances utilisé” (nombre de nœuds, nature des liens, hubs).
-  * [x] Si `knowledge_graph_exports` contient des graphes :
-
-    * Les ajouter à la liste des figures ou en section annexe.
-
-### 2.3. Tests
-
-**Fichier :** `backend/tests/test_graph_tools.py` (et/ou nouveau fichier)
-
-* [x] Ajouter un test `test_knowledge_graph_tool_integration` :
-
-  * [x] Mocker `build_knowledge_graph`, `graph_stats`, `export_graphviz`.
-  * [x] Simuler un appel tool `knowledge_graph_tool`.
-  * [x] Vérifier que `state["knowledge_graph_stats"]` et `state["knowledge_graph_exports"]` sont correctement remplis.
-
-* [x] Ajouter un test reporting :
-
-  * [x] Construire un `job_state` avec `knowledge_graph_stats` + `knowledge_graph_exports`.
-  * [x] Appeler `build_structured_summary`.
-  * [x] Vérifier que le bloc `knowledge_graph` est bien présent et non vide.
+  * lister les claims `status == "controversial"`
+  * pour chacun : résumé des positions + sources.
 
 ---
 
-## 3. Faire respecter `phase.tools` (tool_allowlist) dans `run_agents_job`
+## 6. Anti-redondance / anti-boucle à l’échelle de la recherche
 
-### 3.1. Étendre `run_agents_job` pour accepter un allowlist
+Objectif : empêcher le système de refaire les mêmes requêtes ou de tourner en rond.
+
+### 6.1. Registre des actions de recherche
+
+**Fichiers :** nouveau `backend/app/data/action_log.py`, modifications dans `agents.py` / `search_oracle.py`
+
+* [x] Créer `action_log.py` :
+
+  * [x] Modèle `SearchAction` (en DB ou JSONL) :
+
+    * `job_id`, `agent_name`, `timestamp`
+    * `action_type` (ex. "web_search", "internal_search", "fact_check")
+    * `query` / `subquery`
+    * `normalized_query` (lowercased, stopwords removed)
+    * `result_hash` (hash des URLs / doc_ids)
+  * [x] Fonctions :
+
+    * `record_action(...)`
+    * `find_similar_actions(job_id, normalized_query, action_type) -> List[SearchAction]`
+
+* [x] Intégration :
+
+  * [x] Dans `search_oracle`, `web_search_tool`, `search_vector`, `fact_check_tool` :
+
+    * appeler `record_action(...)` pour chaque requête.
+  * [x] Avant d’exécuter une nouvelle requête :
+
+    * appeler `find_similar_actions(...)`
+    * si > N actions très proches déjà faites → soit :
+
+      * réutiliser les résultats existants,
+      * soit informer l’agent : “requête déjà explorée, reformule ou change d’angle”.
+
+### 6.2. Connexion avec `ConvergenceController`
+
+**Fichier :** `backend/app/workflows/runtime.py`
+
+* [x] Étendre `ConvergenceController.record_iteration(...)` :
+
+  * [x] Fournir un compteur de “requêtes répétées” ou “actions redondantes” pour l’itération.
+* [x] Dans `check()` :
+
+  * [x] Ajouter une condition de stagnation si :
+
+    * fortes répétitions de requêtes
+    * peu de nouvelles sources / evidences.
+
+---
+
+## 7. Utilisation avancée du graphe de connaissances par les agents
+
+Objectif : que les agents puissent interroger le graphe comme un vrai outil de raisonnement.
+
+### 7.1. Tools de requête graphe
 
 **Fichier :** `backend/app/workflows/agents.py`
 
-* [x] Modifier la signature de `run_agents_job` :
+* [x] Ajouter des tools :
 
-  ```python
-  async def run_agents_job(
-      job_id: int,
-      query: str,
-      max_iterations: int,
-      roles: List[str],
-      llm_client,
-      embedder,
-      vs,
-      max_duration_seconds: int,
-      max_token_budget: int,
-      bus,
-      run_ctx,
-      controller,
-      tool_allowlist: Optional[List[str]] = None,
-  ):
-  ```
-* [x] Propager `tool_allowlist` là où tu construis les `AgentSpec` / les instance d’agents :
+  * `name: "knowledge_graph_query_tool"`
 
-  * [x] stocker `agent_spec.allowed_tools = ROLE_ALLOWED_TOOLS[role] ∩ tool_allowlist` (si non-None),
-  * [x] ou passer `tool_allowlist` directement au dispatch de tool.
+    * `parameters` : `topic: string`, `max_nodes: int`
+    * handler :
 
-### 3.2. Appliquer l’allowlist dans l’exécution de tools
+      * appelle `graph_tools.subgraph_for_topic(topic)`
+      * retourne les nœuds / relations pertinents.
+  * `name: "knowledge_graph_hubs_tool"`
 
-**Fichier :** `backend/app/workflows/agents.py`
+    * retourne les hubs (`find_hubs(graph, top_k)`).
 
-* [x] Dans `_execute_tool(...)` (ou équivalent) :
+* [x] Autoriser pour :
 
-  * [x] Récupérer la liste des tools autorisés pour cet agent :
+  * `Analyst`, `Coordinator`, `Hypothesis`, `Critic`.
 
-    * soit depuis `agent_spec.allowed_tools` / `agent.state.allowed_tools`,
-    * soit depuis `state["tool_allowlist"]`.
-  * [x] Avant d’exécuter un tool :
+### 7.2. Intégration aux prompts
 
-    * si `tool_allowlist` est non-None **et** `name` n’est pas dedans → refuser :
+**Fichier :** `backend/app/services/prompts.py` (ou `prompts/*.json`)
 
-      * soit en renvoyant un message d’erreur au LLM,
-      * soit en loggant et en retournant un “tool result” indiquant que l’outil n’est pas autorisé dans cette phase.
+* [x] Pour les rôles concernés, enrichir les instructions système :
 
-### 3.3. Connexion côté orchestrateur
+  * inciter à utiliser le graphe pour :
 
-**Fichier :** `backend/app/workflows/orchestrator.py`
-
-* [x] Là où tu construis `kwargs` pour `run_agents_job` dans chaque phase :
-
-  * [x] S’assurer que tu passes bien :
-
-    ```python
-    kwargs["tool_allowlist"] = phase.tools or None
-    ```
-  * [x] Adapter l’appel :
-
-    ```python
-    result = await run_agents_job(**kwargs)
-    ```
-
-### 3.4. Tests
-
-**Fichier :** `backend/tests/test_e2e_scenarios.py`
-
-* [x] Ajouter un test où :
-
-  * [x] un scénario de test a une phase avec `tools: ["web_search_tool"]` uniquement ;
-  * [x] un agent essaie d’appeler `plot_tool` (via un prompt / tool-calling simulé).
-* [x] Assertions :
-
-  * [x] `plot_tool` n’est pas exécuté (mock non appelé),
-  * [x] un log ou un “tool result” indique que l’outil est interdit.
+    * identifier les zones peu connectées (gaps),
+    * trouver des relations inattendues,
+    * détecter des patterns (clusters d’évidences).
 
 ---
 
-## 4. Alignement des noms d’outils dans `research_scenarios.yaml`
+## 8. Tests et scénarios E2E supplémentaires
 
-### 4.1. Audit et correction
+Objectif : garantir que les nouvelles briques fonctionnent ensemble.
 
-**Fichier :** `configs/research_scenarios.yaml`
+### 8.1. Tests unitaires
 
-* [x] Parcourir toutes les phases de tous les scénarios :
+* [x] `tests/test_search_oracle.py` :
 
-  * [x] S’assurer que chaque `tool` listé dans `tools:` correspond **exactement** à un nom dans `TOOLS` (après ajout de `plot_tool` et `knowledge_graph_tool`).
-  * [x] Corriger :
+  * tester `plan_subqueries`, `search_internal` (mock), `search_web_via_searx` (mock), `update_coverage`.
+* [x] `tests/test_nlp_structuring.py` :
 
-    * `plot_tool` → garder ce nom si c’est celui que tu implémentes,
-    * `knowledge_graph_tool` → idem, correspond au tool que tu ajoutes,
-    * supprimer ou renommer les outils inexistants.
+  * tester `extract_entities`, `extract_relations` sur des textes simples.
+* [x] `tests/test_fact_check_tool.py` :
 
-### 4.2. Validation de cohérence au chargement
+  * mocker `search_semantic` / `search_oracle_tool`
+  * vérifier les verdicts `supported` / `refuted` / `uncertain`.
+* [x] `tests/test_action_log.py` :
 
-**Fichier :** `backend/app/workflows/scenarios.py`
+  * tester `record_action` + `find_similar_actions`.
 
-* [x] Dans `load_scenarios()` ou juste après, ajouter un check :
+### 8.2. Tests E2E
 
-  * [x] Récupérer la liste des tool names connus (depuis `TOOLS` via un import léger, ou définir une liste `KNOWN_TOOLS`).
-  * [x] Pour chaque `phase.tools` :
+* [x] Nouveau test : `tests/test_e2e_research_oracle.py` :
 
-    * si un nom ne figure pas dans `KNOWN_TOOLS` → log WARNING ou lever une exception explicite (en dev/test).
+  * [x] Lancer un job avec scénario dédié qui impose l’usage de `search_oracle_tool`.
+  * [x] Vérifier que :
 
-### 4.3. Tests
+    * des subqueries sont créées,
+    * `knowledge_store` est enrichi,
+    * le rapport final mentionne coverage et gaps.
 
-**Fichier :** `backend/tests/test_scenarios.py`
+* [x] Nouveau test : `tests/test_e2e_conflicts_and_facts.py` :
 
-* [x] Ajouter un test qui :
+  * [x] Créer un petit corpus avec des infos contradictoires.
+  * [x] Lancer un job où :
 
-  * [x] Charge les scénarios,
-  * [x] Vérifie que tous les `phase.tools` sont bien dans la liste des tools déclarés dans `agents.TOOLS`.
+    * `fact_check_tool` est utilisé,
+    * `resolve_conflicts_tool` est invoqué.
+  * [x] Vérifier que :
 
----
-
-## 5. Corriger les imports dans les tests top-level
-
-### 5.1. Revue des imports
-
-**Dossier :** `backend/tests/` (ou `tests/` à la racine selon ton setup)
-
-* [x] Chercher tous les imports du type :
-
-  * `from runtime import ...`
-  * `from workflow import ...`
-  * `from scheduler import ...`
-  * `from debate import ...`
-  * `from references import ...`
-  * `from writing_pipeline import ...`
-* [ ] Remplacer par des imports qualifiés, par ex. :
-
-  * `from app.workflows.runtime import ConvergenceController`
-  * `from app.workflows.workflow import WorkflowEngine`
-  * `from app.workflows.scheduler import ResearchScheduler`
-  * `from app.workflows.debate import run_debate`
-  * `from app.services.references import ReferenceManager`
-                    * `from app.workflows.writing_pipeline import build_scientific_article`
-
-### 5.2. Adapter `conftest.py` si nécessaire
-
-**Fichier :** `backend/tests/conftest.py` (ou équivalent)
-
-* [x] Vérifier que :
-
-  * `sys.path` contient bien `backend` (pour `import app...`),
-  * tu n’ajoutes pas de chemin ambigu qui masque les imports `app.*`.
-
-### 5.3. Vérification globale
-
-* [x] Lancer `pytest` à la racine du repo.
-* [x] Corriger les éventuelles erreurs d’import restantes.
+    * certains claims sont `status="controversial"`,
+    * le rapport liste ces controverses.
 
 ---
 
-## 6. Finitions et doc (facultatif mais recommandé)
+## 9. Documentation interne
 
-### 6.1. Documenter les nouveaux tools
+* [x] Mettre à jour `README_RESEARCH.md` :
 
-**Fichier :** `README_RESEARCH.md`
+  * [x] ajouter une section “Search Oracle & Fact-Checking”
+  * [x] décrire :
 
-* [x] Ajouter une section “Outils avancés” :
+    * le nouveau module `search_oracle`
+    * les nouveaux tools (`search_oracle_tool`, `fact_check_tool`, `resolve_conflicts_tool`, `knowledge_graph_*_tool`)
+    * les garanties de validation multi-source.
+* [x] Ajouter un schéma d’architecture (même en ASCII / diagramme) montrant :
 
-  * [x] `plot_tool` :
-
-    * rôle : générer des figures de données.
-    * paramètres principaux.
-  * [x] `knowledge_graph_tool` :
-
-    * rôle : produire graphe de connaissances + stats.
-    * comment il apparaît dans les rapports (stats, figures, etc.).
-
-### 6.2. Exemple de scénario utilisant les nouveaux outils
-
-**Fichier :** `README_RESEARCH.md` ou nouvel exemple
-
-* [x] Ajouter un exemple de scénario YAML (ou extrait de `configs/research_scenarios.yaml`) :
-
-  * Une phase analytique avec `tools: ["web_search_tool", "plot_tool", "knowledge_graph_tool"]`.
-  * Explication de ce que fait chaque phase.
+  * agents → tools → search_oracle → knowledge_store → graph_tools → reporting.
 
 ---
 
-Une fois cette liste cochée, tu auras réellement :
+Avec cette liste, l’agent a une feuille de route claire pour transformer SearchOne en **pipeline de recherche autonome complet**, capable de :
 
-* des **plots** et des **graphes de connaissance** exploitables par les agents et visibles dans les rapports,
-* des **scénarios** qui imposent effectivement un sous-ensemble d’outils,
-* des **tests** cohérents qui tournent sur la bonne arborescence de modules.
+* collecter des données hétérogènes sans API payante,
+* les structurer finement (graph de connaissances riche),
+* vérifier et croiser les faits,
+* gérer les controverses,
+* éviter les boucles et redondances,
+* et exposer cette puissance via un “cerveau de recherche” unique (`search_oracle_tool`) aux agents de haut niveau.
 
-Là on sera vraiment sur une V1 “fermée” de ton architecture de recherche autonome, prête pour les raffinements de comportement plutôt que de plomberie.
+---
+
+## Progress Tracking
+- [x] Search oracle service skeleton added (`backend/app/services/search_oracle.py`).
+- [x] `search_oracle_tool` defined and wired into `backend/app/workflows/agents.py`.
+- [x] HTML parser service built and URL ingestion now leverages structured sections (`backend/app/services/html_parser.py`, `backend/app/services/ingest.py`).
+- [x] PDF parser implemented with table detection and page-aware chunking/metadata for ingest (`backend/app/services/pdf_parser.py`, `backend/app/services/ingest.py`).
+- [x] Table parser + storage pipeline added, normalizing tabular data into `TabularData` entries (`backend/app/services/table_parser.py`, `backend/app/services/ingest.py`, `backend/app/data/db.py`).
+- [x] NLP structuring heuristics added for entity extraction, relations, and normalization (`backend/app/services/nlp_structuring.py`).
+- [x] Knowledge store now records structured claims/entities/relations with new persist helper (`backend/app/data/knowledge_store.py`).
+- [x] Graph tooling reinforced with entity-aware nodes, relation edges, `find_hubs`, and `subgraph_for_topic` helpers (`backend/app/services/graph_tools.py`).
+- [x] Action log tracking deployed and `fact_check_tool` added for verification workflows (`backend/app/data/action_log.py`, `backend/app/workflows/agents.py`).
+- [x] Knowledge graph query/hubs tools plus updated prompts encourage graph-based reasoning (`backend/app/workflows/agents.py`, `backend/app/services/prompts.py`).
+- [x] Conflict resolution tool + reporting inclusion for fact-checks/controversies (`backend/app/workflows/agents.py`, `backend/app/services/reporting.py`).
+- [x] Tests for action logging and NLP structuring added to keep regressions visible (`tests/test_action_log.py`, `tests/test_nlp_structuring.py`).
+- [x] Continue with fact-checking analysis, reporting, and action logging.
+- [x] Added unit tests for `search_oracle` and `fact_check_tool` to validate planning, search, and verdict synthesis (`tests/test_search_oracle.py`, `tests/test_fact_check_tool.py`).
+- [x] README_RESEARCH now documents the Search Oracle / fact-check pipeline and includes the requested architecture sketch.
+- [x] ConvergenceController consumes action-log redundancy counts to flag repeated access patterns (`backend/app/workflows/runtime.py`, `backend/app/workflows/agents.py`, `backend/app/data/action_log.py`).
+- [x] Research scenarios now prefer `search_oracle_tool` and the new E2E tests validate coverage/gaps plus controversy reporting (`configs/research_scenarios.yaml`, `tests/test_e2e_research_oracle.py`, `tests/test_e2e_conflicts_and_facts.py`).
+
+## Action History
+- 2025-12-04 10:03:30 — Scaffolding of the search oracle service and its tool integration (session state, planning, coverage tracking) completed.
+- 2025-12-04 10:06:50 — Added HTML parser helpers and wired ingest_web_page to use structured sections/links before chunking.
+- 2025-12-04 10:09:19 — Created `pdf_parser` with table heuristics and updated `ingest_pdf_file` to consume structured pages/tables.
+- 2025-12-04 10:12:47 — Added table parser normalization + `TabularData` persistence so detected tables become structured records.
+- 2025-12-04 10:45:21 — Instrumented action logging + `fact_check_tool` for redundancy checks and multi-source validation.
+- 2025-12-04 10:48:10 — Added knowledge graph query/hubs tools and updated prompts so agents interrogate the graph proactively.
+- 2025-12-04 10:52:05 — Added conflict resolution tool and enriched reporting to highlight fact-checks & controversies.
+- 2025-12-04 11:55:14 — Extended research score/reporting with fact-check coverage metrics and controversy summaries.
+- 2025-12-04 10:20:10 - Structured knowledge support introduced (entity/relation persistence plus entity-aware graph hubs/subgraphs).
+- 2025-12-04 10:16:42 - Added `nlp_structuring` helpers for entity extraction, relation spotting, and normalization without external APIs.
+- 2025-12-04 12:14:18 - Wired the action log into Convergence, added search_oracle/fact_check tests, and documented the Search Oracle + fact-check pipeline in `README_RESEARCH.md`.
+- 2025-12-04 13:05:00 - Codified search_oracle-first scenarios and added E2E regression tests that check coverage, gaps, and controversial fact-checks.

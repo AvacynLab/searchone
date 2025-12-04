@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import DATA_DIR
-from app.data.knowledge_store import CLAIMS_FILE, PROMOTION_FILE, POLLUTION_FILE, _load_jsonl
+from app.data.knowledge_store import (
+    PROMOTION_FILE,
+    POLLUTION_FILE,
+    _load_jsonl,
+    load_claims,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +62,44 @@ def _build_claim_nodes(claims: List[Dict[str, Any]], nodes: Dict[str, Dict[str, 
             edges.append({"source": evidence_id, "target": claim_id, "relation": "supports"})
 
 
+def _build_entity_nodes(claims: List[Dict[str, Any]], nodes: Dict[str, Dict[str, Any]], edges: List[Dict[str, Any]]) -> None:
+    for entry in claims:
+        claim_text = str(entry.get("claim") or "").strip()
+        if not claim_text:
+            continue
+        claim_id = _hash_id("claim", claim_text)
+        for entity in entry.get("entities") or []:
+            ent_text = str(entity.get("normalized") or entity.get("text") or "").strip()
+            if not ent_text:
+                continue
+            ent_id = _hash_id("entity", ent_text)
+            label = entity.get("text") or ent_text
+            extra = {"entity_type": entity.get("label"), "source": entity.get("source")}
+            _ensure_nodes(nodes, ent_id, _node_label(label), "entity", extra)
+            edges.append({"source": ent_id, "target": claim_id, "relation": "mentioned_in"})
+
+
+def _build_relation_edges(claims: List[Dict[str, Any]], nodes: Dict[str, Dict[str, Any]], edges: List[Dict[str, Any]]) -> None:
+    for entry in claims:
+        for relation in entry.get("relations") or []:
+            from_text = str(relation.get("from") or "").strip()
+            to_text = str(relation.get("to") or "").strip()
+            if not from_text or not to_text:
+                continue
+            from_id = _hash_id("entity", from_text)
+            to_id = _hash_id("entity", to_text)
+            _ensure_nodes(nodes, from_id, _node_label(from_text), "entity")
+            _ensure_nodes(nodes, to_id, _node_label(to_text), "entity")
+            edges.append(
+                {
+                    "source": from_id,
+                    "target": to_id,
+                    "relation": relation.get("type") or "related",
+                    "context": relation.get("context"),
+                }
+            )
+
+
 def _build_concept_nodes(promotions: List[Dict[str, Any]], nodes: Dict[str, Dict[str, Any]], edges: List[Dict[str, Any]], claims: List[Dict[str, Any]]) -> None:
     for entry in promotions:
         concept = str(entry.get("node") or "").strip()
@@ -91,7 +134,7 @@ def _build_pollution_nodes(pollutions: List[Dict[str, Any]], nodes: Dict[str, Di
 
 
 def build_knowledge_graph(job_id: Optional[int] = None) -> Dict[str, Any]:
-    claims = _load_jsonl(CLAIMS_FILE)
+    claims = load_claims()
     promotions = _load_jsonl(PROMOTION_FILE)
     pollutions = _load_jsonl(POLLUTION_FILE)
 
@@ -99,6 +142,8 @@ def build_knowledge_graph(job_id: Optional[int] = None) -> Dict[str, Any]:
     edges: List[Dict[str, Any]] = []
 
     _build_claim_nodes(claims, nodes, edges)
+    _build_entity_nodes(claims, nodes, edges)
+    _build_relation_edges(claims, nodes, edges)
     _build_concept_nodes(promotions, nodes, edges, claims)
     _build_pollution_nodes(pollutions, nodes, edges)
 
@@ -161,6 +206,51 @@ def graph_stats(graph: Dict[str, Any]) -> Dict[str, Any]:
         "hubs": hub_list,
         "node_count": len(nodes),
         "edge_count": len(edges),
+    }
+
+
+def find_hubs(graph: Dict[str, Any], top_k: int = 10) -> List[Dict[str, Any]]:
+    nodes = {node["id"]: node for node in graph.get("nodes", [])}
+    edges = graph.get("edges") or []
+    degree_count: Dict[str, int] = defaultdict(int)
+    for edge in edges:
+        if src := edge.get("source"):
+            degree_count[src] += 1
+        if tgt := edge.get("target"):
+            degree_count[tgt] += 1
+    for node_id in nodes:
+        degree_count.setdefault(node_id, 0)
+    sorted_hubs = sorted(degree_count.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+    return [
+        {"node": nodes[nid]["label"], "degree": degree, "type": nodes[nid].get("type")}
+        for nid, degree in sorted_hubs
+        if nid in nodes
+    ]
+
+
+def subgraph_for_topic(topic: str, job_id: Optional[int] = None) -> Dict[str, Any]:
+    topic_lower = topic.lower() if topic else ""
+    graph = build_knowledge_graph(job_id=job_id)
+    if not topic_lower:
+        return {"topic": topic, "nodes": [], "edges": [], "counts": {"nodes": 0, "edges": 0}}
+    matched_node_ids = {
+        node["id"]
+        for node in graph.get("nodes", [])
+        if any(topic_lower in str(value).lower() for value in node.values() if isinstance(value, str))
+    }
+    if not matched_node_ids:
+        return {"topic": topic, "nodes": [], "edges": [], "counts": {"nodes": 0, "edges": 0}}
+    filtered_nodes = [node for node in graph.get("nodes", []) if node["id"] in matched_node_ids]
+    filtered_edges = [
+        edge
+        for edge in graph.get("edges", [])
+        if edge.get("source") in matched_node_ids or edge.get("target") in matched_node_ids
+    ]
+    return {
+        "topic": topic,
+        "nodes": filtered_nodes,
+        "edges": filtered_edges,
+        "counts": {"nodes": len(filtered_nodes), "edges": len(filtered_edges)},
     }
 
 

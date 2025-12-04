@@ -24,3 +24,11 @@ def test_convergence_detects_no_evidence_window():
     c.record_iteration(coverage=0.5, evidence_count=0, hypotheses=["h2"])
     c.record_iteration(coverage=0.5, evidence_count=0, hypotheses=["h3"])
     assert c.check() == "no_evidence_window"
+
+
+def test_convergence_detects_repeated_actions():
+    c = ConvergenceController(window=2, min_delta=0.0)
+    c.record_iteration(coverage=0.6, evidence_count=1, hypotheses=["h1"], redundant_actions=2)
+    c.record_iteration(coverage=0.7, evidence_count=2, hypotheses=["h2"], redundant_actions=3)
+    c.record_iteration(coverage=0.8, evidence_count=2, hypotheses=["h3"], redundant_actions=1)
+    assert c.check() == "repeated_actions"

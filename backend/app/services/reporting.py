@@ -10,6 +10,7 @@ from app.core.observability import compute_run_metrics
 from typing import Dict, Any, List, Optional
 
 from app.workflows.writing_pipeline import build_scientific_article
+from app.data.knowledge_store import load_claims
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -85,6 +86,8 @@ def export_markdown(report_struct: Dict[str, Any]) -> str:
     for label in ("coherence", "coverage", "robustness", "novelty"):
         if label in rs:
             lines.append(f"| {label} | {rs[label]:.3f} |")
+    if "fact_check_pass_rate" in rs:
+        lines.append(f"| fact_check_pass_rate | {rs['fact_check_pass_rate']:.3f} |")
     for label in ("coverage_score", "evidence_count", "iterations"):
         if label in metrics:
             lines.append(f"| {label} | {metrics[label]} |")
@@ -185,6 +188,21 @@ def _extract_stats_from_evidence(evidence: List[Dict[str, Any]]) -> Dict[str, An
     return {}
 
 
+def _extract_fact_checks(job_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return job_state.get("fact_checks") or []
+
+
+def _extract_controversies() -> List[Dict[str, Any]]:
+    claims = load_claims()
+    controversies = []
+    for entry in claims:
+        if entry.get("status") == "controversial":
+            controversies.append(entry)
+            if len(controversies) >= 3:
+                break
+    return controversies
+
+
 def _extract_knowledge_topology(job_state: Dict[str, Any]) -> Dict[str, Any]:
     stats = job_state.get("knowledge_graph_stats") or {}
     exports = job_state.get("knowledge_graph_exports") or {}
@@ -266,6 +284,8 @@ def build_structured_summary(job_state: Dict[str, Any]) -> Dict[str, Any]:
     knowledge_topology = _extract_knowledge_topology(job_state)
     kg_stats = job_state.get("knowledge_graph_stats") or {}
     kg_exports = job_state.get("knowledge_graph_exports") or []
+    fact_checks = _extract_fact_checks(job_state)
+    controversies = _extract_controversies()
     return {
         "hypotheses": hypotheses,
         "evidence": evidence,
@@ -275,6 +295,8 @@ def build_structured_summary(job_state: Dict[str, Any]) -> Dict[str, Any]:
         "figures": figures,
         "knowledge_topology": knowledge_topology,
         "knowledge_graph": {"stats": kg_stats, "exports": kg_exports},
+        "fact_checks": fact_checks,
+        "controversies": controversies,
     }
 
 
@@ -334,6 +356,15 @@ def render_summary_block(summary: Dict[str, Any]) -> str:
         if hubs:
             hub_labels = ", ".join([f"{h.get('node')}({h.get('degree')})" for h in hubs])
             lines.append(f"- Hubs: {hub_labels}")
+    if summary.get("fact_checks"):
+        lines.append("\nFact checks récents:")
+        for fc in summary["fact_checks"][:3]:
+            lines.append(f"- Claim '{fc.get('claim')}' a été jugée {fc.get('verdict')} ({len(fc.get('subclaims') or [])} sous-assertions).")
+    if summary.get("controversies"):
+        lines.append("\nControverses signalées:")
+        for claim in summary["controversies"]:
+            status = claim.get("status") or "unknown"
+            lines.append(f"- {claim.get('claim') or '(claim sans texte)'} (statut {status})")
     return "\n".join(lines)
 
 

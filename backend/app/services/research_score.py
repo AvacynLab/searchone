@@ -11,6 +11,7 @@ class ResearchScore:
     robustness: float = 0.5
     novelty: float = 0.5
     graph_stats: Dict[str, Any] = field(default_factory=dict)
+    fact_check_pass_rate: float = 0.0
 
     def update(
         self,
@@ -18,6 +19,7 @@ class ResearchScore:
         unique_sources: int,
         hypotheses: List[str],
         graph_stats: Optional[Dict[str, Any]] = None,
+        fact_checks: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         # simple heuristics: more evidence/sources -> better coverage/robustness; new hypotheses -> novelty
         self.coverage = min(1.0, self.coverage * 0.7 + min(unique_sources, 10) / 10.0 * 0.3)
@@ -44,6 +46,12 @@ class ResearchScore:
                 self.coherence = min(1.0, self.coherence + 0.05)
             hub_bonus = len(graph_stats.get("hubs") or []) * 0.02
             self.novelty = min(1.0, self.novelty + hub_bonus)
+        if fact_checks:
+            total = len(fact_checks)
+            supported = sum(1 for r in fact_checks if r.get("verdict") == "supported")
+            rate = supported / total if total else 0.0
+            self.fact_check_pass_rate = min(1.0, rate)
+            self.robustness = min(1.0, self.robustness + rate * 0.1)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

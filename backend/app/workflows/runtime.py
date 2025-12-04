@@ -107,6 +107,7 @@ class ConvergenceController:
         self.new_sources_history: List[int] = []
         self.score_history: List[float] = []
         self.mode: str = "exploration"
+        self.redundant_history: List[int] = []
 
     def record_iteration(
         self,
@@ -115,6 +116,7 @@ class ConvergenceController:
         hypotheses: List[str],
         research_score: Optional[Dict[str, Any]] = None,
         new_sources: Optional[int] = None,
+        redundant_actions: Optional[int] = None,
     ) -> None:
         self.coverage_history.append(coverage)
         self.evidence_history.append(evidence_count)
@@ -126,6 +128,10 @@ class ConvergenceController:
         if new_sources is not None:
             self.new_sources_history.append(new_sources)
             self.new_sources_history = self.new_sources_history[-(self.window + 1) :]
+
+        if redundant_actions is not None:
+            self.redundant_history.append(redundant_actions)
+            self.redundant_history = self.redundant_history[-(self.window + 1) :]
 
         if research_score:
             values = [
@@ -172,6 +178,10 @@ class ConvergenceController:
             self.new_sources_history[-self.window :]
         ) <= 1:
             return "low_new_sources"
+        if len(self.redundant_history) >= self.window and sum(self.redundant_history[-self.window :]) >= max(
+            1, self.window
+        ):
+            return "repeated_actions"
         return None
 
     def _trend_stagnant(self) -> bool:

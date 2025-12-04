@@ -32,6 +32,47 @@ Ces variables sont reprises automatiquement par la configuration (`app.core.conf
 4. **Tests automatisés** : une suite ciblée (plot_tools, graph_tools, scénarios, writing pipeline, scheduler/cache) garantit les briques supplémentaires ; les tests E2E restent à compléter pour couvrir les cas `quick_literature_review` et la résistance SearxNG.
 
 Ces éléments évoluent au fil des itérations ; ce fichier sert de point de référence pour les développeurs qui reprennent un job ou cherchent à ajuster un scénario particulier.
+
+## Search Oracle & Fact-Checking
+
+La nouvelle couche `search_oracle` encapsule toute la logique de recherche multi-source : elle planifie les sous-requêtes, sollicite d'abord la mémoire vectorielle interne (`search_vector`/`search_semantic`), puis bascule automatiquement vers SearxNG si la couverture est insuffisante. Chaque session garde la trace des budgets (`internal`, `web`, `api`), des gaps identifiés et des identifiants d'évidences persistés dans `knowledge_store`. Ce cerveau de recherche est exposé via `search_oracle_tool` aux rôles `Explorer`, `Researcher` et `SourceHunterEconTech`, ce qui garantit un pilotage cohérent des sources externes et des doublons.
+
+Pour valider les conclusions, le workflow embarque également :
+
+* `fact_check_tool` qui décompose une affirmation, recherche des preuves internes puis externes, classe chaque sous-assertion (`supported`, `uncertain`, `contradicted`) et persiste le verdict dans `knowledge_store`.
+* `resolve_conflicts_tool` pour réévaluer un claim existant, comparer les sources et basculer explicitement le statut (`supported`, `refuted`, `controversial`, `unknown`).
+* L'intégration de `ResearchScore` et `reporting` avec le facteur `fact_check_pass_rate` ainsi que la nouvelle section “Controverses et désaccords”.
+
+Les agents peuvent interroger le graphe enrichi via :
+
+* `knowledge_graph_query_tool` (sous-graphe filtré par thème) et `knowledge_graph_hubs_tool` (nœuds les plus connectés).
+* Des prompts étendus qui incitent Analyst, Hypothesis, Critic et Coordinator à scruter les gaps et les hubs du graphe.
+
+### Architecture simplifiée
+
+```
+        [ Agents ]
+             │
+             ▼
+       [ Tools Layer ]
+  (search_oracle, fact_check_tool, resolve_conflicts_tool,
+   knowledge_graph_query_tool, knowledge_graph_hubs_tool, ...)
+             │
+             ▼
+       [ search_oracle ]
+             │
+             ▼
+    [ knowledge_store + action_log ]
+             │
+             ▼
+       [ graph_tools ]
+             │
+             ▼
+        [ reporting ]
+```
+
+Les agents consultent ces outils, `search_oracle` enrichit la mémoire et `knowledge_store`, le graphe reflète les entités/relations, et les rapports/fact checks recyclent ces structures pour délivrer des synthèses robustes.
+
 ## Outils avancés
 
 Les outils plot_tool et knowledge_graph_tool permettent de générer des figures et des graphes de connaissances directement depuis les agents :

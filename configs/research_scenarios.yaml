@@ -5,7 +5,7 @@ scenarios:
       - name: exploration
         description: "Gather high-level evidence with Explorer/Curator and seed Analyst hypotheses."
         agents: ["Explorer", "Curator", "Analyst"]
-        tools: ["web_search_tool", "search_semantic", "search_vector", "knowledge_graph_tool"]
+        tools: ["search_oracle_tool", "search_semantic", "search_vector", "knowledge_graph_tool"]
         max_iterations: 3
         max_duration_seconds: 240
         exit_criteria:
@@ -46,7 +46,7 @@ scenarios:
       - name: domain_alpha
         description: "Explore first domain via Explorer/Curator."
         agents: ["Explorer", "Curator"]
-        tools: ["web_search_tool", "search_semantic"]
+        tools: ["search_oracle_tool", "web_search_tool", "search_semantic"]
         max_iterations: 2
         max_duration_seconds: 180
         exit_criteria:
@@ -56,7 +56,7 @@ scenarios:
       - name: domain_beta
         description: "Parallel exploration of second domain."
         agents: ["Explorer", "Curator"]
-        tools: ["web_search_tool", "search_vector"]
+        tools: ["search_oracle_tool", "web_search_tool", "search_vector"]
         max_iterations: 2
         max_duration_seconds: 180
         exit_criteria:

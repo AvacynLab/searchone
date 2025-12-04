@@ -10,6 +10,9 @@ import json
 from hashlib import md5
 import os
 from collections import Counter
+from app.services.html_parser import extract_main_content, html_to_markdown
+from app.services.pdf_parser import parse_pdf
+from app.services.table_parser import infer_schema, table_to_records
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -188,23 +191,31 @@ def ingest_web_page(url: str, title: str = "") -> Dict[str, Any]:
     if not _domain_allowed(url):
         raise ValueError("Domain not allowed by whitelist/blacklist")
     html = download_url(url)
-    text = extract_text_from_html(html)
-    sections = segment_text_sections(text)
+    parsed = extract_main_content(html)
+    doc_title = title or parsed.get("title") or url
+    sections = [sec for sec in parsed.get("sections", []) if sec.get("content")]
+    fallback_text = ""
     if not sections:
-        sections = [{"title": "body", "text": text}]
+        fallback_text = html_to_markdown(html)
+        if not fallback_text:
+            fallback_text = extract_text_from_html(html)
+        if not fallback_text:
+            raise ValueError("No text extracted from URL")
+        sections = [{"title": doc_title or "body", "content": fallback_text}]
     all_chunks = []
     for sec in sections:
-        sec_chunks = chunk_text_with_positions(sec["text"])
+        sec_chunks = chunk_text_with_positions(sec["content"])
         for c in sec_chunks:
             c["section_title"] = sec.get("title")
         all_chunks.extend(sec_chunks)
     if not all_chunks:
         raise ValueError("No text extracted from URL")
-    meta_info = compute_source_metadata(url, title=title or url)
+    meta_info = compute_source_metadata(url, title=doc_title)
     src_meta = json.loads(meta_info.get("source_metadata") or "{}")
+    doc_links = parsed.get("links") or []
     with get_session() as s:
         doc = Document(
-            title=title or url,
+            title=doc_title,
             source_path=url,
             reliability=meta_info.get("reliability"),
             source_metadata=meta_info.get("source_metadata"),
@@ -225,8 +236,9 @@ def ingest_web_page(url: str, title: str = "") -> Dict[str, Any]:
                 "reliability": meta_info.get("reliability"),
                 "section_title": c.get("section_title"),
                 "doc_type": "html",
-                "title": src_meta.get("title") or title or url,
+                "title": src_meta.get("title") or doc_title,
                 "tags": src_meta.get("tags") or [],
+                "links": doc_links,
                 "published_at": None,
             }
             h = md5(c["text"].encode("utf-8")).hexdigest()
@@ -236,31 +248,41 @@ def ingest_web_page(url: str, title: str = "") -> Dict[str, Any]:
             ch = Chunk(document_id=doc.id, chunk_index=idx, text=c["text"], meta=json.dumps(meta_chunk))
             s.add(ch)
         s.commit()
-    return {"document_id": doc_id, "chunks": len(all_chunks), "source": url, "title": title or url}
+    return {"document_id": doc_id, "chunks": len(all_chunks), "source": url, "title": doc_title}
 
 
 def ingest_pdf_file(path: str, title: str = "", published_at: str = "") -> Dict[str, Any]:
     """Ingest a local PDF: extract text, segment, chunk, and persist."""
-    from db import get_session, Document, Chunk
-    text = extract_text_from_pdf(path)
-    if not text:
+    from db import get_session, Document, Chunk, TabularData
+    pdf_data = parse_pdf(path)
+    if not pdf_data.get("full_text"):
         raise ValueError("No text extracted from PDF")
-    sections = segment_text_sections(text)
+    sections = []
+    for page in pdf_data.get("pages", []):
+        page_text = page.get("text", "").strip()
+        if not page_text:
+            continue
+        sections.append({"title": f"Page {page.get('number')}", "content": page_text, "page": page.get("number")})
     if not sections:
-        sections = [{"title": "body", "text": text}]
+        raise ValueError("No textual sections extracted from PDF")
     all_chunks = []
     for sec in sections:
-        sec_chunks = chunk_text_with_positions(sec["text"])
+        sec_chunks = chunk_text_with_positions(sec["content"])
         for c in sec_chunks:
             c["section_title"] = sec.get("title")
+            c["page_number"] = sec.get("page")
         all_chunks.extend(sec_chunks)
     meta_info = metadata_from_file(path, title=title, published_at=published_at)
+    combined_metadata = json.loads(meta_info.get("source_metadata") or "{}")
+    combined_metadata["pdf_metadata"] = pdf_data.get("metadata")
+    combined_metadata["detected_tables"] = pdf_data.get("tables", [])
+    combined_metadata["full_text_length"] = len(pdf_data.get("full_text") or "")
     with get_session() as s:
         doc = Document(
             title=title or meta_info.get("title") or path,
             source_path=path,
             reliability=meta_info.get("reliability"),
-            source_metadata=meta_info.get("source_metadata"),
+            source_metadata=json.dumps(combined_metadata, ensure_ascii=False),
             source_type=meta_info.get("source_type"),
             published_at=meta_info.get("published_at"),
         )
@@ -279,6 +301,7 @@ def ingest_pdf_file(path: str, title: str = "", published_at: str = "") -> Dict[
                 "title": meta_info.get("title") or title or path,
                 "author": meta_info.get("author"),
                 "published_at": meta_info.get("published_at"),
+                "page_number": c.get("page_number"),
             }
             h = md5(c["text"].encode("utf-8")).hexdigest()
             CHUNK_HASHES[h] += 1
@@ -286,6 +309,21 @@ def ingest_pdf_file(path: str, title: str = "", published_at: str = "") -> Dict[
                 continue
             ch = Chunk(document_id=doc.id, chunk_index=idx, text=c["text"], meta=json.dumps(meta_chunk))
             s.add(ch)
+        for table in pdf_data.get("tables", []):
+            if not table.get("rows") or len(table["rows"]) < 2:
+                continue
+            schema = infer_schema(table)
+            records = table_to_records(table, schema)
+            if not records:
+                continue
+            tabular_entry = TabularData(
+                document_id=doc.id,
+                table_id=table.get("id") or f"{path}:{table.get('page') or '0'}",
+                table_schema=json.dumps(schema, ensure_ascii=False),
+                records=json.dumps(records, ensure_ascii=False),
+                table_metadata=json.dumps({"page": table.get("page"), "source": path}, ensure_ascii=False),
+            )
+            s.add(tabular_entry)
         s.commit()
     return {"document_id": doc.id, "chunks": len(all_chunks), "source": path, "title": title or path}
 

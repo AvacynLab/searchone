@@ -1,17 +1,18 @@
 import asyncio
+import datetime as _dt
+import json
 import logging
 import os
 import platform
-from typing import List, Dict, Any, Tuple, Optional
-from datetime import datetime, timezone, timedelta
+import re
 import time
-import json
+from collections import Counter
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 import requests
 import httpx
-from collections import Counter
 from urllib.parse import urlsplit
 from bs4 import BeautifulSoup
-from datetime import datetime as _dt
 from app.data.db import (
     Job,
     get_session,
@@ -42,12 +43,40 @@ from app.core.stop_flags import is_stop_requested, clear_stop
 from app.core.model_router import resolve_model
 from app.workflows.runtime import AgentSpec, RunContext, MessageBus, ConvergenceController, AgentInterface
 from app.data.memory import ConversationMemory
-from app.data.knowledge_store import search_semantic, get_related_nodes, store_claim, promote_knowledge
+from app.data.knowledge_store import (
+    search_semantic,
+    get_related_nodes,
+    store_claim,
+    promote_knowledge,
+    store_fact_check_result,
+    get_claim_by_id,
+    update_claim_status,
+)
+from app.data.action_log import (
+    count_recent_redundant_actions,
+    find_similar_actions,
+    normalize_query,
+    record_action,
+)
+from app.services.search_oracle import (
+    SearchSessionState,
+    plan_subqueries,
+    search_internal,
+    search_web_via_searx,
+    enrich_knowledge_store,
+    update_coverage,
+)
 from app.services.research_score import ResearchScore
 from app.workflows.debate import DebateRound, tally_votes, run_debate
 from app.services.writing import OutlineGenerator, SectionWriter, StyleCritic, FinalComposer, GlobalCritic
 from app.services.reporting import build_diagnostic
-from app.services.graph_tools import build_knowledge_graph, graph_stats, export_graphviz
+from app.services.graph_tools import (
+    build_knowledge_graph,
+    find_hubs,
+    graph_stats,
+    export_graphviz,
+    subgraph_for_topic,
+)
 from app.services.plot_tools import generate_plot
 from app.core.tracing import start_span
 from app.services.references import ReferenceManager
@@ -70,6 +99,9 @@ RETRIEVAL_ONLY_TOPK = int(os.getenv("SEARCHONE_RETRIEVAL_ONLY_TOPK", "8"))
 ESTIMATED_COST_PER_TOKEN = float(os.getenv("SEARCHONE_ESTIMATED_COST_PER_TOKEN", "0"))
 STAGNATION_WINDOW = int(os.getenv("SEARCHONE_STAGNATION_WINDOW", "3"))
 STAGNATION_MIN_DELTA = float(os.getenv("SEARCHONE_STAGNATION_MIN_DELTA", "0.01"))
+ACTION_REDUNDANCY_WINDOW_MINUTES = int(
+    os.getenv("SEARCHONE_ACTION_REDUNDANCY_WINDOW_MINUTES", "20")
+)
 EXPERIMENT_TIMEOUT = float(os.getenv("SEARCHONE_EXPERIMENT_TIMEOUT", "6"))
 SOURCE_PRIORITY_RECENCY_DAYS = int(os.getenv("SEARCHONE_SOURCE_PRIORITY_RECENCY_DAYS", "365"))
 SOURCE_PRIORITY_TYPE_BONUS = {"pdf": 0.1, "url": 0.05}
@@ -139,13 +171,51 @@ DEFAULT_ROLES = ["Researcher", "Critic", "Experimenter", "FactChecker", "SourceH
 ENABLE_RERANK = env_enable_rerank.lower() in ("1", "true", "yes", "on") if env_enable_rerank else False
 _cross_encoder = None
 ROLE_ALLOWED_TOOLS = {
-    "Explorer": {"web_search_tool", "fetch_and_parse_url", "search_hybrid", "search_vector", "search_semantic", "web_cache_lookup"},
+    "Explorer": {"web_search_tool", "fetch_and_parse_url", "search_hybrid", "search_vector", "search_semantic", "web_cache_lookup", "search_oracle_tool"},
     "Curator": {"search_hybrid", "search_vector", "search_semantic", "web_cache_lookup"},
-    "Analyst": {"search_semantic", "search_vector", "stats_summary", "correlation_matrix", "ttest_independent", "simplify_expression", "solve_equation", "plot_tool", "knowledge_graph_tool", "web_cache_lookup"},
+    "Analyst": {
+        "search_semantic",
+        "search_vector",
+        "stats_summary",
+        "correlation_matrix",
+        "ttest_independent",
+        "simplify_expression",
+        "solve_equation",
+        "plot_tool",
+        "knowledge_graph_tool",
+        "knowledge_graph_query_tool",
+        "knowledge_graph_hubs_tool",
+        "fact_check_tool",
+        "web_cache_lookup",
+    },
     "Experimenter": {"run_experiment", "stats_summary", "ttest_independent", "simplify_expression", "plot_tool", "web_cache_lookup"},
-    "Coordinator": {"web_cache_lookup", "knowledge_graph_tool"},
-    "Critic": {"search_semantic", "search_vector", "knowledge_graph_tool", "web_cache_lookup"},
+    "Coordinator": {
+        "web_cache_lookup",
+        "knowledge_graph_tool",
+        "knowledge_graph_query_tool",
+        "knowledge_graph_hubs_tool",
+        "resolve_conflicts_tool",
+    },
+    "Critic": {
+        "search_semantic",
+        "search_vector",
+        "knowledge_graph_tool",
+        "knowledge_graph_query_tool",
+        "knowledge_graph_hubs_tool",
+        "fact_check_tool",
+        "resolve_conflicts_tool",
+        "web_cache_lookup",
+    },
+    "FactChecker": {"fact_check_tool", "web_search_tool", "search_vector", "knowledge_graph_tool", "web_cache_lookup"},
+    "Hypothesis": {
+        "knowledge_graph_tool",
+        "knowledge_graph_query_tool",
+        "knowledge_graph_hubs_tool",
+        "web_cache_lookup",
+    },
+    "Researcher": {"search_oracle_tool", "search_semantic", "search_vector", "web_search_tool", "fetch_and_parse_url", "knowledge_graph_tool", "web_cache_lookup"},
     "Redacteur": {"web_cache_lookup", "plot_tool"},
+    "SourceHunterEconTech": {"search_oracle_tool", "search_semantic", "search_vector", "web_search_tool", "fetch_and_parse_url", "knowledge_graph_tool", "web_cache_lookup"},
 }
 TOOLS = [
     {
@@ -278,6 +348,91 @@ TOOLS = [
                         "description": "Choix du périmètre des données (courant vs global).",
                     },
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "knowledge_graph_query_tool",
+            "description": "Interroge le graphe pour un thème donné et renvoie le sous-graphe correspondant.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Thème ou mot-clé à explorer"},
+                    "max_nodes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 25,
+                    },
+                    "job_id": {"type": "integer", "description": "Job spécifique ciblé (facultatif)"},
+                },
+                "required": ["topic"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "knowledge_graph_hubs_tool",
+            "description": "Détecte les nœuds les plus connectés dans le graphe courant pour identifier les hubs de connaissance.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "top_k": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10},
+                    "job_id": {"type": "integer", "description": "Job spécifié (facultatif)"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_oracle_tool",
+            "description": "Planifie et exécute une recherche multi-sources (mémoire interne + web via SearxNG) et expose les gaps couverts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Requête principale à explorer"},
+                    "max_depth": {"type": "integer", "minimum": 1, "default": 2},
+                    "focus": {"type": "string", "description": "Focus thématique ou angle (récent, théorique, applications)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fact_check_tool",
+            "description": "Vérifie une affirmation en recherchant des évidences internes et externes puis en classifiant chaque sous-assertion.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "claim": {"type": "string", "description": "Affirmation à vérifier"},
+                    "context_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "IDs d'évidence pour centrer la vérification",
+                    },
+                },
+                "required": ["claim"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resolve_conflicts_tool",
+            "description": "Compare les sources d'une claim existante, propose un verdict (supported/refuted/controversial) et actualise le statut.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "claim_id": {"type": "string", "description": "Identifiant de claim (claim_id)"},
+                    "comment": {"type": "string", "description": "Contexte additionnel facultatif"},
+                },
+                "required": ["claim_id"],
             },
         },
     },
@@ -1412,15 +1567,19 @@ async def run_agents_job(
             evidence_count=total_evidence,
             hypotheses=[m.get("hypothesis", "") for m in drained_msgs],
         )
+        redundant_actions = count_recent_redundant_actions(job_id, window_minutes=ACTION_REDUNDANCY_WINDOW_MINUTES)
+        state["recent_redundant_actions"] = redundant_actions
         controller.record_iteration(
             coverage=sum((m.get("meta", {}) or {}).get("reliability", 0.0) for m in (drained_msgs or [])) / (len(drained_msgs) or 1),
             evidence_count=total_evidence,
             hypotheses=[m.get("hypothesis", "") for m in drained_msgs],
+            redundant_actions=redundant_actions,
         )
         rscore.update(
             evidence_count=total_evidence,
             unique_sources=len({(m.get("meta", {}) or {}).get("source") for m in drained_msgs if m.get("meta")}),
             hypotheses=[m.get("hypothesis", "") for m in drained_msgs],
+            fact_checks=state.get("fact_checks") or [],
         )
         if MAX_EMPTY_ITERS and empty_iters >= MAX_EMPTY_ITERS:
             state['last_error'] = "no_evidence"
@@ -1908,7 +2067,12 @@ async def _execute_tool(name: str, args: Dict[str, Any], agent: Agent) -> List[D
     if name == "search_vector":
         q = args.get("query") or ""
         k = args.get("top_k") or 3
-        return await agent.retrieve_evidence(q, top_k=min(max(int(k), 1), 12))
+        hits = await agent.retrieve_evidence(q, top_k=min(max(int(k), 1), 12))
+        try:
+            record_action(getattr(agent, "job_id", None), getattr(agent, "name", None), "search_vector", q, hits)
+        except Exception:
+            pass
+        return hits
     if name == "sources_summary":
         # summarize recent docs/domains for situational awareness
         try:
@@ -2032,6 +2196,39 @@ async def _execute_tool(name: str, args: Dict[str, Any], agent: Agent) -> List[D
             "job_id": graph_job,
         }
         return [{"score": None, "text": summary, "meta": meta}]
+    if name == "knowledge_graph_query_tool":
+        topic = (args.get("topic") or "").strip()
+        if not topic:
+            return []
+        job_ref = args.get("job_id") or getattr(agent, "job_id", None)
+        graph = subgraph_for_topic(topic, job_id=job_ref)
+        max_nodes = int(args.get("max_nodes") or 25)
+        max_nodes = max(1, min(max_nodes, 100))
+        nodes = (graph.get("nodes") or [])[:max_nodes]
+        node_ids = {n["id"] for n in nodes}
+        edges = [
+            edge
+            for edge in (graph.get("edges") or [])
+            if edge.get("source") in node_ids or edge.get("target") in node_ids
+        ]
+        summary = f"Sous-graphe pour '{topic}': {graph.get('counts', {}).get('nodes', 0)} nœuds, {graph.get('counts', {}).get('edges', 0)} arêtes."
+        meta = {
+            "source_type": "knowledge_graph_query",
+            "topic": topic,
+            "nodes": nodes,
+            "edges": edges,
+            "counts": graph.get("counts"),
+            "job_id": job_ref,
+        }
+        return [{"score": None, "text": summary, "meta": meta}]
+    if name == "knowledge_graph_hubs_tool":
+        job_ref = args.get("job_id") or getattr(agent, "job_id", None)
+        top_k = int(args.get("top_k") or 10)
+        graph = build_knowledge_graph(job_id=job_ref)
+        hubs = find_hubs(graph, top_k=top_k)
+        summary = ", ".join(f"{h['node']} ({h['degree']})" for h in hubs[:top_k])
+        meta = {"source_type": "knowledge_graph_hubs", "hubs": hubs, "job_id": job_ref}
+        return [{"score": None, "text": f"Hubs: {summary}", "meta": meta}]
     if name == "ingest_async":
         try:
             urls = args.get("urls") or []
@@ -2063,7 +2260,163 @@ async def _execute_tool(name: str, args: Dict[str, Any], agent: Agent) -> List[D
         results = await run_web_search(q, top_k=min(max(int(k), 1), 8))
         if state_ref is not None:
             state_ref["web_requests"] = state_ref.get("web_requests", 0) + 1
+        try:
+            record_action(getattr(agent, "job_id", None), getattr(agent, "name", None), "web_search_tool", q, results)
+        except Exception:
+            pass
         return results
+    if name == "search_oracle_tool":
+        query = (args.get("query") or "").strip()
+        if not query:
+            return []
+        raw_depth = args.get("max_depth")
+        try:
+            max_depth = max(int(raw_depth), 1)
+        except Exception:
+            max_depth = 2
+        focus = args.get("focus")
+        session = SearchSessionState(job_id=getattr(agent, "job_id", 0) or 0, root_query=query, focus=focus)
+        session.vector_store = getattr(agent, "vs", None)
+        session.embedder = getattr(agent, "embedder", None)
+        session.web_search = run_web_search
+        subqueries = plan_subqueries(query, max_depth=max_depth, focus=focus)
+        if not subqueries:
+            subqueries = [query]
+        duplicate_subqueries: List[str] = []
+        for subquery in subqueries:
+            normalized = normalize_query(subquery)
+            duplicates = find_similar_actions(session.job_id, normalized, "search_oracle")
+            if duplicates:
+                duplicate_subqueries.append(subquery)
+            session.meta.setdefault("duplicates", []).extend(duplicates)
+            internal_hits = await search_internal(session, subquery)
+            evidences = list(internal_hits)
+            try:
+                record_action(session.job_id, getattr(agent, "name", None), "search_oracle", subquery, [ev.to_dict() for ev in evidences])
+            except Exception:
+                pass
+            if len(evidences) < 2:
+                evidences.extend(await search_web_via_searx(session, subquery))
+                try:
+                    record_action(session.job_id, getattr(agent, "name", None), "search_oracle_web", subquery, [ev.to_dict() for ev in evidences])
+                except Exception:
+                    pass
+            ids = enrich_knowledge_store(evidences)
+            session.evidence_ids.extend(ids)
+            update_coverage(session, subquery, evidences)
+        summary_lines = [f"Search oracle pour '{query}' ({len(session.subqueries)} sous-requêtes)."]
+        for idx, chunk in enumerate(session.subqueries, start=1):
+            summary_lines.append(
+                f"  {idx}. {chunk['subquery']} → {chunk['evidence_count']} évidences (coverage={chunk['coverage']:.2f})."
+            )
+        if session.gaps:
+            summary_lines.append("Gaps détectés: " + "; ".join(session.gaps))
+        if duplicate_subqueries:
+            summary_lines.append("Duplications détectées: " + "; ".join(set(duplicate_subqueries)))
+        summary_text = "\n".join(summary_lines)
+        summary_meta = {
+            "source_type": "search_oracle",
+            "job_id": session.job_id,
+            "subqueries": session.subqueries,
+            "gaps": session.gaps,
+            "used_budget": session.used_budget,
+            "evidence_ids": session.evidence_ids,
+        }
+        job_state = getattr(agent, "job_state", None)
+        if job_state is not None:
+            job_state.setdefault("search_oracle", []).append(summary_meta)
+        return [{"score": None, "text": summary_text, "meta": summary_meta}]
+    if name == "resolve_conflicts_tool":
+        claim_id = (args.get("claim_id") or "").strip()
+        comment = args.get("comment") or ""
+        if not claim_id:
+            return []
+        claim = get_claim_by_id(claim_id)
+        if not claim:
+            return [{"score": None, "text": f"Claim '{claim_id}' introuvable.", "meta": {"source_type": "resolve_conflicts"}}]
+        support_ids = set(claim.get("support_evidence_ids") or claim.get("evidence_ids") or [])
+        refute_ids = set(claim.get("refute_evidence_ids") or [])
+        if len(support_ids) > len(refute_ids):
+            new_status = "supported"
+        elif len(refute_ids) > len(support_ids):
+            new_status = "refuted"
+        else:
+            new_status = "controversial"
+        updated = update_claim_status(
+            claim_id,
+            new_status,
+            support_evidence_ids=list(support_ids),
+            refute_evidence_ids=list(refute_ids),
+        )
+        summary_text = f"Claim '{claim.get('claim')}' évaluée comme {new_status}. Commentaire: {comment}"
+        job_state = getattr(agent, "job_state", None)
+        if job_state is not None:
+            job_state.setdefault("conflicts", []).append({"claim_id": claim_id, "status": new_status, "comment": comment})
+        return [{"score": None, "text": summary_text, "meta": {"source_type": "resolve_conflicts", "claim": claim.get("claim"), "status": new_status, "updated": updated}}]
+    if name == "fact_check_tool":
+        claim = (args.get("claim") or "").strip()
+        context_ids = args.get("context_ids") or []
+        if not claim:
+            return []
+        sentences = [sent.strip() for sent in re.split(r"[.!?]+", claim) if sent.strip()]
+        if not sentences:
+            sentences = [claim]
+        sentences = sentences[:4]
+        subclaims = []
+        for sub in sentences:
+            hits = await agent.retrieve_evidence(sub, top_k=3)
+            try:
+                record_action(getattr(agent, "job_id", None), getattr(agent, "name", None), "fact_check_internal", sub, hits)
+            except Exception:
+                pass
+            verdict = "supported" if hits else "uncertain"
+            sources = [
+                hit.get("meta", {}).get("source") or hit.get("meta", {}).get("domain") or hit.get("text")
+                for hit in hits
+            ]
+            if not hits:
+                web_hits = await run_web_search(sub, top_k=3)
+                try:
+                    record_action(getattr(agent, "job_id", None), getattr(agent, "name", None), "fact_check_web", sub, web_hits)
+                except Exception:
+                    pass
+                if web_hits:
+                    verdict = "supported"
+                    sources.extend(
+                        [
+                            hit.get("meta", {}).get("source")
+                            or hit.get("meta", {}).get("domain")
+                            or hit.get("text")
+                            for hit in web_hits
+                        ]
+                    )
+            subclaims.append({"subclaim": sub, "verdict": verdict, "sources": [s for s in sources if s]})
+        tally = Counter(item["verdict"] for item in subclaims)
+        if tally.get("contradicted"):
+            overall = "contradicted"
+        elif tally.get("supported", 0) >= tally.get("uncertain", 0):
+            overall = "supported"
+        else:
+            overall = "uncertain"
+        aggregated_support = [src for entry in subclaims for src in entry["sources"]]
+        fact_result = {
+            "claim": claim,
+            "subclaims": subclaims,
+            "verdict": overall,
+            "supporting_sources": aggregated_support,
+            "contradicting_sources": [],
+            "context_ids": context_ids,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+        store_fact_check_result(fact_result)
+        summary_lines = [f"Fact-check : {overall}", ""]
+        for entry in subclaims:
+            summary_lines.append(f"- {entry['subclaim']} ({entry['verdict']}): {len(entry['sources'])} sources")
+        summary_text = "\n".join(summary_lines)
+        job_state = getattr(agent, "job_state", None)
+        if job_state is not None:
+            job_state.setdefault("fact_checks", []).append(fact_result)
+        return [{"score": None, "text": summary_text, "meta": {"source_type": "fact_check", **fact_result}}]
     if name == "web_cache_lookup":
         q = args.get("query") or ""
         if not q:
