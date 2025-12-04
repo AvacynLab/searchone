@@ -6,6 +6,7 @@ with a `prompt` (or `system` / `text`) field.
 from app.core.prompt_state import get_system_prompt
 import random
 import json
+import os
 from pathlib import Path
 import logging
 
@@ -13,6 +14,8 @@ logger = logging.getLogger(__name__)
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
 _CUSTOM_CACHE = {}
 _CUSTOM_ERRORS = set()
+_STYLE_CACHE = {}
+PROMPT_STYLE = os.getenv("SEARCHONE_PROMPT_STYLE", "").strip().lower()
 
 _AB_VARIANTS = {
     "concise": "Reponds de maniere concise, factuelle, sans elaboration inutile.",
@@ -26,8 +29,16 @@ ROLE_SYSTEM_PROMPTS = {
     "Hypothesis": "Tu es l'agent Generateur d'hypotheses. Propose des hypotheses plausibles et testables, en listant variables clefs et pistes de test.",
     "Experimenter": "Tu es l'agent Experimentateur. Tu traduis une hypothese en protocole d'experimentation, choisis metriques et interpretes rapidement les resultats.",
     "Coordinator": "Tu es l'agent Coordinateur. Tu decomposes la mission en phases, coordonnes les agents, arbitres l'arret ou la re-planification.",
-    "Redacteur": "Tu es l'agent Redacteur. Tu produis un brouillon scientifique structure IMRaD, sobre, avec citations claires et references en fin de texte.",
-    "Critic": "Tu es l'agent Critique. Tu pointes les failles, risques et biais; tu proposes des contre-arguments et tu demandes des confirmations supplementaires.",
+    "Redacteur": (
+        "Tu es l'agent Redacteur. Redige un article au style scientifique (niveau doctorant) "
+        "en structure IMRaD : contexte, contributions, methodes, resultats, discussion et limites. "
+        "Sois concis, cite clairement les sources, renforce les transitions, neutralise le fluff."
+    ),
+    "Critic": (
+        "Tu es l'agent Critique. Fournis une checklist de cohérence, rigueur et absence "
+        "de contradiction. Classe les risques, presencia des biais potentiels et propose des "
+        "contre-arguments / validations supplementaires."
+    ),
 }
 
 
@@ -40,6 +51,34 @@ def _load_custom_prompt(agent_name: str) -> str:
     path = PROMPTS_DIR / f"{agent_name}.json"
     if not path.exists():
         _CUSTOM_CACHE[agent_name] = ""
+        return ""
+
+
+def _load_style_variant(style: str) -> str:
+    """Load a shared style prompt variant (style_journal.json)."""
+    if not style:
+        return ""
+    key = style.lower()
+    if key in _STYLE_CACHE:
+        return _STYLE_CACHE[key]
+    path = PROMPTS_DIR / f"style_{key}.json"
+    if not path.exists():
+        _STYLE_CACHE[key] = ""
+        return ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        prompt = ""
+        if isinstance(data, dict):
+            prompt = data.get("prompt") or data.get("system") or data.get("text") or ""
+        elif isinstance(data, str):
+            prompt = data
+        else:
+            prompt = ""
+        _STYLE_CACHE[key] = prompt
+        return prompt
+    except Exception as e:
+        logger.warning("Failed to load style variant %s: %s", key, e)
+        _STYLE_CACHE[key] = ""
         return ""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -65,6 +104,9 @@ def _role_prefix(agent_role: str, agent_name: str = "") -> str:
     sys = get_system_prompt()
     if sys:
         base = f"{sys}\n\n{base}"
+    variant = _load_style_variant(PROMPT_STYLE)
+    if variant:
+        base = f"{base}\n\n{variant}"
     return base.strip()
 
 

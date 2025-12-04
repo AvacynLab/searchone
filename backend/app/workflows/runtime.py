@@ -104,28 +104,78 @@ class ConvergenceController:
         self.coverage_history: List[float] = []
         self.evidence_history: List[int] = []
         self.hypothesis_history: List[str] = []
+        self.new_sources_history: List[int] = []
+        self.score_history: List[float] = []
+        self.mode: str = "exploration"
 
-    def record_iteration(self, coverage: float, evidence_count: int, hypotheses: List[str]) -> None:
+    def record_iteration(
+        self,
+        coverage: float,
+        evidence_count: int,
+        hypotheses: List[str],
+        research_score: Optional[Dict[str, Any]] = None,
+        new_sources: Optional[int] = None,
+    ) -> None:
         self.coverage_history.append(coverage)
         self.evidence_history.append(evidence_count)
         self.hypothesis_history.extend([h or "" for h in hypotheses])
-        # trim to window
-        self.coverage_history = self.coverage_history[-(self.window + 1):]
-        self.evidence_history = self.evidence_history[-(self.window + 1):]
-        self.hypothesis_history = self.hypothesis_history[-(self.window * 3):]
+        self.coverage_history = self.coverage_history[-(self.window + 1) :]
+        self.evidence_history = self.evidence_history[-(self.window + 1) :]
+        self.hypothesis_history = self.hypothesis_history[-(self.window * 3) :]
+
+        if new_sources is not None:
+            self.new_sources_history.append(new_sources)
+            self.new_sources_history = self.new_sources_history[-(self.window + 1) :]
+
+        if research_score:
+            values = [
+                float(research_score.get(k) or 0.0)
+                for k in ("coherence", "coverage", "robustness", "novelty")
+                if isinstance(research_score.get(k), (int, float))
+            ]
+            if values:
+                avg_score = sum(values) / len(values)
+                self.score_history.append(avg_score)
+                self.score_history = self.score_history[-(self.window + 1) :]
+
+        self._update_mode(coverage, evidence_count)
+
+    def _update_mode(self, coverage: float, evidence_count: int) -> None:
+        if self.mode == "exploration" and coverage >= 0.6 and evidence_count >= 2:
+            self.mode = "exploitation"
+        elif self.mode == "exploitation":
+            low_new = sum(self.new_sources_history[-2:]) if len(self.new_sources_history) >= 2 else 0
+            if low_new < 1 or coverage >= 0.8:
+                self.mode = "closure"
+
+    def current_mode(self) -> str:
+        return self.mode
 
     def check(self) -> Optional[str]:
         """Return reason for stagnation if detected, else None."""
         if len(self.coverage_history) < self.window + 1:
             return None
-        recent = self.coverage_history[-self.window - 1:]
+        recent = self.coverage_history[-(self.window + 1) :]
         if max(recent) - min(recent) < self.min_delta:
             return "coverage_stagnation"
-        if len(self.evidence_history) >= self.window and all(e == 0 for e in self.evidence_history[-self.window:]):
+        if len(self.evidence_history) >= self.window and all(
+            e == 0 for e in self.evidence_history[-self.window :]
+        ):
             return "no_evidence_window"
-        # simple cycle detection: repeated top hypothesis
+        if self._trend_stagnant():
+            return "score_stagnation"
         if len(self.hypothesis_history) >= self.window * 2:
-            tail = self.hypothesis_history[-self.window:]
+            tail = self.hypothesis_history[-self.window :]
             if len(set(tail)) == 1 and tail[0]:
-                return "repeated_hypothesis"
+                return "repeated_arguments"
+        if len(self.new_sources_history) >= self.window and sum(
+            self.new_sources_history[-self.window :]
+        ) <= 1:
+            return "low_new_sources"
         return None
+
+    def _trend_stagnant(self) -> bool:
+        if len(self.score_history) < 2:
+            return False
+        delta = abs(self.score_history[-1] - self.score_history[-2])
+        return delta < self.min_delta

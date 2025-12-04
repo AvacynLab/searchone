@@ -38,6 +38,30 @@ if not OPENROUTER_API_KEY:
     except Exception:
         OPENROUTER_API_KEY = OPENROUTER_API_KEY
 
+# Application metadata
+APP_VERSION = os.getenv("SEARCHONE_VERSION", "0.0.1")
+JOB_TOKEN_BUDGET = int(os.getenv("SEARCHONE_JOB_TOKEN_BUDGET", "0"))
+WEB_QUERY_BUDGET = int(os.getenv("SEARCHONE_WEB_QUERY_BUDGET", "0"))
+LOG_LEVEL = os.getenv("SEARCHONE_LOG_LEVEL", "INFO").upper()
+
+# Search caching parameters
+WEB_CACHE_ENABLED = os.getenv("SEARCHONE_WEB_CACHE_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+WEB_CACHE_TTL_SECONDS = int(os.getenv("SEARCHONE_WEB_CACHE_TTL_SECONDS", "600"))
+WEB_CACHE_CLEANUP_INTERVAL = int(os.getenv("SEARCHONE_WEB_CACHE_CLEANUP_INTERVAL", "600"))
+WEB_SEARCH_ENGINE_NAME = os.getenv("SEARCHONE_WEB_SEARCH_ENGINE", "searxng")
+WEB_SEARCH_ENGINE_LIST = tuple(
+    sorted(
+        {
+            entry.strip()
+            for entry in os.getenv("SEARCHONE_WEB_SEARCH_ENGINES", WEB_SEARCH_ENGINE_NAME).split(",")
+            if entry.strip()
+        }
+    )
+)
+WEB_SEARCH_ENGINE_SET = ",".join(WEB_SEARCH_ENGINE_LIST) or "default"
+WEB_SEARCH_FAILURE_THRESHOLD = int(os.getenv("SEARCHONE_WEB_SEARCH_FAILURE_THRESHOLD", "3"))
+WEB_SEARCH_BREAKER_COOLDOWN = int(os.getenv("SEARCHONE_WEB_SEARCH_BREAKER_COOLDOWN", "90"))
+
 # Chunking parameters
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))

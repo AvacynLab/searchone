@@ -261,6 +261,29 @@ def build_collect_subpipeline(query: str, reason: str = "") -> Pipeline:
     return Pipeline(nodes=nodes, edges=edges)
 
 
+def build_conflict_subpipeline(query: str, reason: str = "") -> Pipeline:
+    nodes = [
+        PipelineNode(name="clarify_question", fn=clarify_question, kwargs={"reason": reason}),
+        PipelineNode(name="collect_complementary", fn=collect_complementary, kwargs={"reason": reason}),
+        PipelineNode(name="debate_and_decide", fn=debate_and_decide),
+    ]
+    edges = [
+        ("clarify_question", "collect_complementary"),
+        ("collect_complementary", "debate_and_decide"),
+    ]
+    return Pipeline(nodes=nodes, edges=edges)
+
+
+def build_seek_sources_subpipeline(query: str, reason: str = "") -> Pipeline:
+    nodes = [
+        PipelineNode(name="clarify_question", fn=clarify_question, kwargs={"reason": reason}),
+        PipelineNode(name="collect_complementary", fn=collect_complementary, kwargs={"reason": reason}),
+        PipelineNode(name="synthesize_claims", fn=synthesize_claims),
+    ]
+    edges = [("clarify_question", "collect_complementary"), ("collect_complementary", "synthesize_claims")]
+    return Pipeline(nodes=nodes, edges=edges)
+
+
 async def execute_actions_from_bus(bus: Any, state: Dict[str, Any], query: str) -> List[Dict[str, Any]]:
     """
     Drain bus actions (ex: replan_collect) and run lightweight sub-pipelines.
@@ -278,6 +301,25 @@ async def execute_actions_from_bus(bus: Any, state: Dict[str, Any], query: str) 
             engine = WorkflowEngine(sub_pipe.linearize())
             results = await engine.run(context=sub_ctx)
             executed.append({"action": action, "context": sub_ctx, "results": results})
+        elif a_type == "focus_conflicts":
+            sub_query = action.get("query") or query
+            reason = action.get("reason") or ""
+            sub_ctx = {"query": sub_query, "reason": reason}
+            sub_pipe = build_conflict_subpipeline(sub_query, reason=reason)
+            engine = WorkflowEngine(sub_pipe.linearize())
+            results = await engine.run(context=sub_ctx)
+            executed.append({"action": action, "context": sub_ctx, "results": results})
+        elif a_type == "seek_additional_sources":
+            sub_query = action.get("query") or query
+            reason = action.get("reason") or ""
+            sub_ctx = {"query": sub_query, "reason": reason}
+            sub_pipe = build_seek_sources_subpipeline(sub_query, reason=reason)
+            engine = WorkflowEngine(sub_pipe.linearize())
+            results = await engine.run(context=sub_ctx)
+            executed.append({"action": action, "context": sub_ctx, "results": results})
+        elif a_type == "downgrade_low_quality_sources":
+            sub_ctx = {"query": query, "note": "sources downgraded", "marked": action.get("marked")}
+            executed.append({"action": action, "context": sub_ctx, "results": []})
     if executed:
         state.setdefault("pipeline_events", []).extend(executed)
     return executed

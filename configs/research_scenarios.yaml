@@ -1,0 +1,73 @@
+scenarios:
+  quick_literature_review:
+    objective: "Collect quickly a broad overview of the topic, summarize key facts, and produce a concise report."
+    phases:
+      - name: exploration
+        description: "Gather high-level evidence with Explorer/Curator and seed Analyst hypotheses."
+        agents: ["Explorer", "Curator", "Analyst"]
+        tools: ["web_search_tool", "search_semantic", "search_vector", "knowledge_graph_tool"]
+        max_iterations: 3
+        max_duration_seconds: 240
+        exit_criteria:
+          coverage: 0.6
+          evidence: 3
+      - name: analysis
+        description: "Have Analyst and Experimenter summarize evidence, validate with stats, and check plots."
+        agents: ["Analyst", "Experimenter"]
+        tools: ["stats_summary", "plot_tool", "knowledge_graph_tool"]
+        max_iterations: 2
+        max_duration_seconds: 200
+        exit_criteria:
+          coherence: 0.5
+
+  deep_theory_exploration:
+    objective: "Investigate theoretical directions with multiple hypothesis/experiment cycles and critical review."
+    phases:
+      - name: hypothesis_cycle
+        description: "Analyst and Experimenter propose hypotheses and design quick experiments."
+        agents: ["Analyst", "Experimenter"]
+        tools: ["stats_summary", "run_experiment", "plot_tool", "knowledge_graph_tool"]
+        max_iterations: 4
+        max_duration_seconds: 360
+        exit_criteria:
+          novelty: 0.5
+      - name: critic_review
+        description: "Critic reviews conclusions and seeks contradictions."
+        agents: ["Critic", "Analyst"]
+        tools: ["knowledge_graph_tool", "search_semantic", "search_vector"]
+        max_iterations: 2
+        max_duration_seconds: 240
+        exit_criteria:
+          coherence: 0.7
+
+  multi_domain_synthesis:
+    objective: "Cover multiple sub-topics in parallel before consolidating knowledge into a synthesis."
+    phases:
+      - name: domain_alpha
+        description: "Explore first domain via Explorer/Curator."
+        agents: ["Explorer", "Curator"]
+        tools: ["web_search_tool", "search_semantic"]
+        max_iterations: 2
+        max_duration_seconds: 180
+        exit_criteria:
+          coverage: 0.4
+        parallel_group: domain_exploration
+        domain: "alpha"
+      - name: domain_beta
+        description: "Parallel exploration of second domain."
+        agents: ["Explorer", "Curator"]
+        tools: ["web_search_tool", "search_vector"]
+        max_iterations: 2
+        max_duration_seconds: 180
+        exit_criteria:
+          coverage: 0.4
+        parallel_group: domain_exploration
+        domain: "beta"
+      - name: synthesis
+        description: "Synthesize insights with Analyst, Redacteur, and Critic."
+        agents: ["Analyst", "Redacteur", "Critic"]
+        tools: ["plot_tool", "knowledge_graph_tool", "simplify_expression"]
+        max_iterations: 3
+        max_duration_seconds: 300
+        exit_criteria:
+          coherence: 0.6

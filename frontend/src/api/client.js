@@ -32,9 +32,24 @@ const api = {
     if (!res.ok) throw new Error(`Evidence failed (${res.status})`)
     return res.json()
   },
+  async jobMetrics(id) {
+    const res = await fetch(`/api/jobs/${id}/metrics`)
+    if (!res.ok) throw new Error(`Metrics failed (${res.status})`)
+    return res.json()
+  },
+  async jobDecisions(id, limit = 50) {
+    const res = await fetch(`/api/jobs/${id}/decisions?limit=${limit}`)
+    if (!res.ok) throw new Error(`Decisions failed (${res.status})`)
+    return res.json()
+  },
   async listJobs() {
     const res = await fetch(`/api/jobs`)
     if (!res.ok) throw new Error(`Jobs failed (${res.status})`)
+    return res.json()
+  },
+  async jobsBoard(limit = 50, offset = 0) {
+    const res = await fetch(`/api/jobs/board?limit=${limit}&offset=${offset}`)
+    if (!res.ok) throw new Error(`Jobs board failed (${res.status})`)
     return res.json()
   },
   async setSystemPrompt(prompt) {

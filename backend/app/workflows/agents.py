@@ -2,8 +2,8 @@ import asyncio
 import logging
 import os
 import platform
-from typing import List, Dict, Any, Tuple
-from datetime import datetime, timezone
+from typing import List, Dict, Any, Tuple, Optional
+from datetime import datetime, timezone, timedelta
 import time
 import json
 import requests
@@ -12,11 +12,31 @@ from collections import Counter
 from urllib.parse import urlsplit
 from bs4 import BeautifulSoup
 from datetime import datetime as _dt
-from app.data.db import Job
+from app.data.db import (
+    Job,
+    get_session,
+    Chunk,
+    save_job_state,
+    get_web_cache_entry,
+    store_web_cache_entry,
+    cleanup_web_cache_entries,
+)
 from app.services.llm import LLMClient
 from app.data.vector_store import FaissStore
-from app.data.db import get_session, Chunk, save_job_state
-from app.core.config import EMBEDDING_MODEL, DATA_DIR, SEARXNG_URL
+from app.core.config import (
+    EMBEDDING_MODEL,
+    DATA_DIR,
+    SEARXNG_URL,
+    WEB_CACHE_ENABLED,
+    WEB_CACHE_TTL_SECONDS,
+    WEB_CACHE_CLEANUP_INTERVAL,
+    WEB_SEARCH_ENGINE_NAME,
+    WEB_SEARCH_ENGINE_SET,
+    WEB_SEARCH_FAILURE_THRESHOLD,
+    WEB_SEARCH_BREAKER_COOLDOWN,
+    JOB_TOKEN_BUDGET,
+    WEB_QUERY_BUDGET,
+)
 from app.services.prompts import propose_prompt, vote_prompt
 from app.core.stop_flags import is_stop_requested, clear_stop
 from app.core.model_router import resolve_model
@@ -40,6 +60,7 @@ PREFERRED_TYPES = ("pdf", "url")
 AUTO_SEED_CORPUS = os.getenv("SEARCHONE_AUTO_SEED_CORPUS", "")
 AUTO_SEED_ENDPOINT = os.getenv("SEARCHONE_SEED_ENDPOINT", "http://127.0.0.1:2001/ingest/seed_corpus")
 AGENT_TOKEN_BUDGET = int(os.getenv("SEARCHONE_AGENT_TOKEN_BUDGET", "0"))  # 0 means no extra limit
+WEB_REQUEST_BUDGET = WEB_QUERY_BUDGET
 MAX_EMPTY_ITERS = int(os.getenv("SEARCHONE_MAX_EMPTY_ITERS", "2"))
 HEALTHCHECK_TIMEOUT = float(os.getenv("SEARCHONE_HEALTHCHECK_TIMEOUT", "5"))
 RETRIEVAL_ONLY_THRESHOLD = int(os.getenv("SEARCHONE_RETRIEVAL_ONLY_THRESHOLD", "2"))
@@ -116,13 +137,13 @@ DEFAULT_ROLES = ["Researcher", "Critic", "Experimenter", "FactChecker", "SourceH
 ENABLE_RERANK = env_enable_rerank.lower() in ("1", "true", "yes", "on") if env_enable_rerank else False
 _cross_encoder = None
 ROLE_ALLOWED_TOOLS = {
-    "Explorer": {"web_search_tool", "fetch_and_parse_url", "search_hybrid", "search_vector", "search_semantic"},
-    "Curator": {"search_hybrid", "search_vector", "search_semantic"},
-    "Analyst": {"search_semantic", "search_vector", "stats_summary", "correlation_matrix", "ttest_independent", "simplify_expression", "solve_equation"},
-    "Experimenter": {"run_experiment", "stats_summary", "ttest_independent", "simplify_expression"},
-    "Coordinator": set(),
-    "Critic": {"search_semantic", "search_vector"},
-    "Redacteur": set(),
+    "Explorer": {"web_search_tool", "fetch_and_parse_url", "search_hybrid", "search_vector", "search_semantic", "web_cache_lookup"},
+    "Curator": {"search_hybrid", "search_vector", "search_semantic", "web_cache_lookup"},
+    "Analyst": {"search_semantic", "search_vector", "stats_summary", "correlation_matrix", "ttest_independent", "simplify_expression", "solve_equation", "web_cache_lookup"},
+    "Experimenter": {"run_experiment", "stats_summary", "ttest_independent", "simplify_expression", "web_cache_lookup"},
+    "Coordinator": {"web_cache_lookup"},
+    "Critic": {"search_semantic", "search_vector", "web_cache_lookup"},
+    "Redacteur": {"web_cache_lookup"},
 }
 TOOLS = [
     {
@@ -188,6 +209,23 @@ TOOLS = [
                 "properties": {
                     "query": {"type": "string", "description": "Requete a chercher"},
                     "top_k": {"type": "integer", "minimum": 1, "maximum": 8, "default": 4},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_cache_lookup",
+            "description": "Interroger le cache applicatif pour savoir si une requête web a déjà été exécutée.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Requête recherchée"},
+                    "lang": {"type": "string", "description": "Lang de la requête", "default": "fr"},
+                    "safe_search": {"type": "boolean", "description": "Activer le filtrage safe search", "default": True},
+                    "engine": {"type": "string", "description": "Moteur utilisé pour le cache", "default": WEB_SEARCH_ENGINE_NAME},
                 },
                 "required": ["query"],
             },
@@ -340,6 +378,68 @@ TOOLS = [
         },
     },
 ]
+
+ENGINE_FAILURE_STATE: Dict[str, Dict[str, Any]] = {}
+LAST_CACHE_CLEANUP = 0.0
+
+def _normalize_query(query: str) -> str:
+    return " ".join(query.lower().strip().split())
+
+
+def _build_cache_key(query: str, lang: str, safe_search: bool, engine_set: str) -> str:
+    normalized = _normalize_query(query)
+    return f"{normalized}|{lang}|{int(bool(safe_search))}|{engine_set}"
+
+
+def _lookup_web_cache(query: str, lang: str, safe_search: bool, engine_set: str):
+    if not WEB_CACHE_ENABLED:
+        return None
+    key = _build_cache_key(query, lang, safe_search, engine_set)
+    entry = get_web_cache_entry(key)
+    if not entry or not entry.result_payload:
+        return None
+    try:
+        return json.loads(entry.result_payload)
+    except Exception:
+        return None
+
+
+def _persist_web_cache(query: str, lang: str, safe_search: bool, engine_set: str, results: List[Dict[str, Any]]) -> None:
+    if not WEB_CACHE_ENABLED:
+        return
+    key = _build_cache_key(query, lang, safe_search, engine_set)
+    payload = json.dumps(results, ensure_ascii=False)
+    expires = datetime.now(timezone.utc) + timedelta(seconds=WEB_CACHE_TTL_SECONDS)
+    store_web_cache_entry(key, query, lang, safe_search, engine_set, payload, expires)
+
+
+def _clean_cache_if_due() -> None:
+    global LAST_CACHE_CLEANUP
+    if not WEB_CACHE_ENABLED or WEB_CACHE_CLEANUP_INTERVAL <= 0:
+        return
+    now_ts = time.time()
+    if now_ts - LAST_CACHE_CLEANUP < WEB_CACHE_CLEANUP_INTERVAL:
+        return
+    cleanup_web_cache_entries(datetime.now(timezone.utc))
+    LAST_CACHE_CLEANUP = now_ts
+
+
+def _is_engine_paused(engine: str) -> bool:
+    state = ENGINE_FAILURE_STATE.get(engine) or {}
+    paused_until = state.get("paused_until")
+    return bool(paused_until and paused_until > time.time())
+
+
+def _record_engine_result(engine: str, success: bool) -> None:
+    state = ENGINE_FAILURE_STATE.setdefault(engine, {"failures": 0, "paused_until": None})
+    if success:
+        state["failures"] = 0
+        state["paused_until"] = None
+        return
+    state["failures"] += 1
+    if state["failures"] >= WEB_SEARCH_FAILURE_THRESHOLD:
+        state["paused_until"] = time.time() + WEB_SEARCH_BREAKER_COOLDOWN
+        logger.warning("web_search.engine_paused", extra={"engine": engine, "until": state["paused_until"]})
 
 TOOL_WHITELIST = {t["function"]["name"] for t in TOOLS}
 TOOL_CALL_TIMEOUT = float(os.getenv("SEARCHONE_TOOL_TIMEOUT", "8"))
@@ -1041,9 +1141,14 @@ async def run_agents_job(job_id: int, query: str, max_iterations: int = 5, roles
         "council": {},
         "timeline": [],
         "token_spent": 0,
+        "web_requests": 0,
         "usage": {},
         "agent_specs": [spec.to_dict() for spec in agent_specs],
     }
+    for agent in agents:
+        agent.job_state = state
+        agent.job_id = job_id
+
     if high_risk:
         audit = audit_entry("high_risk_query", {"query": query})
         state.setdefault("audit", []).append(audit)
@@ -1124,6 +1229,11 @@ async def run_agents_job(job_id: int, query: str, max_iterations: int = 5, roles
         if AGENT_TOKEN_BUDGET and state.get("token_spent", 0) >= AGENT_TOKEN_BUDGET:
             save_job_state(job_id, json_str(state), status='failed_cost')
             logger.warning("Job %s stopped: agent token budget exceeded (%s)", job_id, AGENT_TOKEN_BUDGET)
+            clear_stop(job_id)
+            return state
+        if WEB_REQUEST_BUDGET and state.get("web_requests", 0) >= WEB_REQUEST_BUDGET:
+            save_job_state(job_id, json_str(state), status='failed_web_budget')
+            logger.warning("Job %s stopped: web request budget exceeded (%s)", job_id, WEB_REQUEST_BUDGET)
             clear_stop(job_id)
             return state
         # check for external pause/stop commands
@@ -1421,28 +1531,66 @@ def _domain_from_url(url: str) -> str:
         return ""
 
 
-async def run_web_search(query: str, top_k: int = 4) -> List[Dict[str, Any]]:
+async def run_web_search(
+    query: str,
+    top_k: int = 4,
+    engine_name: Optional[str] = None,
+    lang: str = "fr",
+    safe_search: bool = True,
+) -> List[Dict[str, Any]]:
     """Call an external search API (env SEARCHONE_WEB_SEARCH_ENDPOINT)."""
     if not query:
         return []
+    engine = engine_name or WEB_SEARCH_ENGINE_NAME
+    engine_set = WEB_SEARCH_ENGINE_SET or engine
+    if _is_engine_paused(engine):
+        logger.warning(
+            "web_search.breaker_paused",
+            extra={"engine": engine, "key": query[:200], "until": ENGINE_FAILURE_STATE.get(engine, {}).get("paused_until")},
+        )
+        return []
+    _clean_cache_if_due()
+    cached = _lookup_web_cache(query, lang, safe_search, engine_set)
+    if cached is not None:
+        logger.info("web_search.cache_hit", extra={"engine": engine, "query": query[:200], "count": len(cached)})
+        return cached
     data = None
+    headers = {"User-Agent": "Mozilla/5.0 (SearchOne/LMStudio)"}
+    params = {"q": query, "format": "json", "language": lang, "safesearch": 1 if safe_search else 0}
+    primary_error = None
     if WEB_SEARCH_ENDPOINT:
         try:
-            headers = {"User-Agent": "Mozilla/5.0 (SearchOne/LMStudio)"}
             async with httpx.AsyncClient(timeout=WEB_SEARCH_TIMEOUT, headers=headers) as client:
-                params = {"q": query, "format": "json", "language": "fr", "safesearch": 1}
                 resp = await client.get(WEB_SEARCH_ENDPOINT, params=params)
                 resp.raise_for_status()
                 payload = resp.json()
-                # normalize searxng JSON to a list
                 data = payload.get("results") if isinstance(payload, dict) else payload
-        except Exception as e:
-            logger.warning("web_search.failed", extra={"query": query[:200], "error": str(e)})
-            # fallback: parse HTML from the same endpoint (useful if JSON access is forbidden)
+            _record_engine_result(engine, True)
+        except httpx.HTTPStatusError as exc:
+            primary_error = f"status_{exc.response.status_code}"
+            logger.warning(
+                "web_search.http_status",
+                extra={"engine": engine, "query": query[:200], "status": exc.response.status_code},
+            )
+            _record_engine_result(engine, False)
+        except httpx.RequestError as exc:
+            primary_error = "network_error"
+            logger.warning(
+                "web_search.network_failure",
+                extra={"engine": engine, "query": query[:200], "error": str(exc)},
+            )
+            _record_engine_result(engine, False)
+        except Exception as exc:
+            primary_error = "unknown_error"
+            logger.warning(
+                "web_search.failure",
+                extra={"engine": engine, "query": query[:200], "error": str(exc)},
+            )
+            _record_engine_result(engine, False)
+        if data is None:
             try:
-                headers = {"User-Agent": "Mozilla/5.0 (SearchOne/LMStudio)"}
                 async with httpx.AsyncClient(timeout=WEB_SEARCH_TIMEOUT, headers=headers) as client:
-                    resp = await client.get(WEB_SEARCH_ENDPOINT, params={"q": query, "language": "fr"})
+                    resp = await client.get(WEB_SEARCH_ENDPOINT, params={"q": query, "language": lang})
                     resp.raise_for_status()
                     soup = BeautifulSoup(resp.text, "html.parser")
                     items = soup.select(".result") or soup.select("article.result")
@@ -1457,14 +1605,14 @@ async def run_web_search(query: str, top_k: int = 4) -> List[Dict[str, Any]]:
                         snippet = snippet_tag.get_text(" ", strip=True) if snippet_tag else ""
                         parsed.append({"title": title, "url": url, "snippet": snippet})
                     data = parsed
-                    logger.info("web_search.searx_html_fallback", extra={"query": query[:200], "count": len(parsed)})
-            except Exception as e2:
-                logger.warning("web_search.failed_html_fallback", extra={"query": query[:200], "error": str(e2)})
+                    logger.info("web_search.html_fallback", extra={"engine": engine, "query": query[:200], "count": len(parsed)})
+                _record_engine_result(engine, True)
+            except Exception as exc:
+                logger.warning("web_search.html_fallback_failure", extra={"engine": engine, "error": str(exc)})
     if data is None:
-        # best-effort fallback: DuckDuckGo HTML endpoint (public, no key). Lightweight parsing.
         try:
             async with httpx.AsyncClient(timeout=WEB_SEARCH_TIMEOUT) as client:
-                resp = await client.get("https://duckduckgo.com/html/", params={"q": query, "kl": "fr-fr"})
+                resp = await client.get("https://duckduckgo.com/html/", params={"q": query, "kl": f"{lang}-{lang}"})
                 resp.raise_for_status()
                 soup = BeautifulSoup(resp.text, "html.parser")
                 items = soup.select(".result") or soup.select(".result__body")
@@ -1479,12 +1627,15 @@ async def run_web_search(query: str, top_k: int = 4) -> List[Dict[str, Any]]:
                     snippet = snippet_tag.get_text(" ", strip=True) if snippet_tag else ""
                     parsed.append({"title": title, "url": url, "snippet": snippet})
                 data = parsed
-                logger.info("web_search.ddg_fallback", extra={"query": query[:200], "count": len(parsed)})
-        except Exception as e:
-            logger.warning("web_search.failed_no_endpoint", extra={"query": query[:200], "error": str(e)})
+                logger.info("web_search.ddg_fallback", extra={"engine": engine, "query": query[:200], "count": len(parsed), "error": primary_error})
+            _record_engine_result(engine, True)
+        except Exception as exc:
+            logger.warning(
+                "web_search.ddg_failure",
+                extra={"engine": engine, "query": query[:200], "error": str(exc), "prev_error": primary_error},
+            )
+            _record_engine_result(engine, False)
             return []
-
-    # Support both list payloads and dict with "results"
     results = data if isinstance(data, list) else data.get("results", [])
     out = []
     for item in results[:top_k]:
@@ -1496,7 +1647,11 @@ async def run_web_search(query: str, top_k: int = 4) -> List[Dict[str, Any]]:
         text = "\n".join([p for p in [title, snippet, url] if p])
         meta = {"source": url or "web_search", "source_type": "url", "title": title, "domain": _domain_from_url(url)}
         out.append({"score": item.get("score"), "text": text[:WEB_FETCH_MAX_CHARS], "meta": meta})
-    logger.info("web_search.success", extra={"query": query[:200], "count": len(out)})
+    _persist_web_cache(query, lang, safe_search, engine_set, out)
+    logger.info(
+        "web_search.success",
+        extra={"engine": engine, "query": query[:200], "count": len(out), "safe": safe_search, "lang": lang},
+    )
     return out
 
 
@@ -1647,7 +1802,46 @@ async def _execute_tool(name: str, args: Dict[str, Any], agent: Agent) -> List[D
     if name == "web_search_tool":
         q = args.get("query") or ""
         k = args.get("top_k") or 4
-        return await run_web_search(q, top_k=min(max(int(k), 1), 8))
+        state_ref = getattr(agent, "job_state", None)
+        if WEB_REQUEST_BUDGET and state_ref and state_ref.get("web_requests", 0) >= WEB_REQUEST_BUDGET:
+            state_ref["web_request_budget_exceeded"] = True
+            logger.warning(
+                "web_search.budget_blocked",
+                extra={
+                    "agent": getattr(agent, "name", "?"),
+                    "job": getattr(agent, "job_id", None),
+                    "limit": WEB_REQUEST_BUDGET,
+                },
+            )
+            return []
+        results = await run_web_search(q, top_k=min(max(int(k), 1), 8))
+        if state_ref is not None:
+            state_ref["web_requests"] = state_ref.get("web_requests", 0) + 1
+        return results
+    if name == "web_cache_lookup":
+        q = args.get("query") or ""
+        if not q:
+            return []
+        lang = args.get("lang") or "fr"
+        safe = args.get("safe_search")
+        safe = bool(safe) if safe is not None else True
+        engine = args.get("engine") or WEB_SEARCH_ENGINE_NAME
+        cached = _lookup_web_cache(q, lang, safe, WEB_SEARCH_ENGINE_SET or engine)
+        if cached:
+            return [
+                {
+                    "score": None,
+                    "text": f"Cache.hit: {len(cached)} résultats pour '{q}'",
+                    "meta": {"source": "web_cache", "engine": engine, "lang": lang, "safe_search": safe},
+                }
+            ]
+        return [
+            {
+                "score": None,
+                "text": f"Aucun cache trouvé pour '{q}' ({lang}, safe={safe}).",
+                "meta": {"source": "web_cache", "engine": engine, "lang": lang, "safe_search": safe},
+            }
+        ]
     if name == "fetch_and_parse_url":
         url = args.get("url") or ""
         if not url:

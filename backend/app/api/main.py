@@ -9,7 +9,7 @@ import json
 import os
 import logging
 import requests
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import urllib.parse
 from collections import Counter
 import re
@@ -52,7 +52,7 @@ if not _HAS_ST:
 
         def get_sentence_embedding_dimension(self):
             return 3
-from app.core.config import DATA_DIR, EMBEDDING_MODEL, SEARXNG_URL
+from app.core.config import DATA_DIR, EMBEDDING_MODEL, SEARXNG_URL, JOB_TOKEN_BUDGET
 from app.data.db import init_db, get_session, Document, Chunk, db_stats, db_job_status_counts
 from app.services.ingest import (
     extract_text_from_pdf,
@@ -69,7 +69,12 @@ from app.services.reporting import save_report
 from app.services.reporting import build_diagnostic
 from app.services.ingest import download_url, extract_text_from_html
 from app.services.crawler import crawl_and_ingest
-from app.core.observability import compute_run_metrics
+from app.core.observability import (
+    build_job_metrics,
+    build_typed_timeline,
+    compute_run_metrics,
+    read_decisions,
+)
 from app.data.knowledge_store import consolidate_promotions
 import logging
 from app.core.logging_config import configure_logging
@@ -140,7 +145,7 @@ SEED_CORPUS = {
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="SearchOne MVP")
-scheduler = ResearchScheduler(snapshot_dir=Path("data"))
+scheduler = ResearchScheduler(snapshot_dir=DATA_DIR)
 SCHEDULER_LOOP_SECONDS = int(os.getenv("SEARCHONE_SCHEDULER_INTERVAL", "0") or 0)
 _scheduler_task: asyncio.Task | None = None
 if SCHEDULER_LOOP_SECONDS <= 0:
@@ -202,7 +207,7 @@ async def _log_dependency_status():
 def _launch_scheduled_job(query: str) -> int:
     """Create a scheduled job and start background processing."""
     job_id = create_job(f"scheduled-{query[:20] or 'job'}")
-    start_job_background(job_id, query)
+    start_job_background(job_id, query, max_token_budget=JOB_TOKEN_BUDGET)
     return job_id
 
 
@@ -1105,7 +1110,14 @@ def simple_report(q: str, top_k: int = 10):
 
 
 @app.post('/jobs/start')
-def start_job(name: str, query: str, max_duration_seconds: int = 300, max_token_budget: int = 0, max_iterations: int = 5, priority: int = 0):
+def start_job(
+    name: str,
+    query: str,
+    max_duration_seconds: int = 300,
+    max_token_budget: int = JOB_TOKEN_BUDGET,
+    max_iterations: int = 5,
+    priority: int = 0,
+):
     # create job entry and start background agent
     job_id = create_job(name, priority=priority)
     start_job_background(job_id, query, max_duration_seconds=max_duration_seconds, max_token_budget=max_token_budget, max_iterations=max_iterations)
@@ -1136,15 +1148,12 @@ def job_delete(job_id: int):
     return {'id': job_id, 'status': 'deleted'}
 
 
-@app.post('/jobs/stop')
-def stop_job(job_id: int):
-    # graceful stop: set stop flag (RQ workers), cancel queued job, and mark DB as failed
+def _stop_job_common(job_id: int) -> Dict[str, Any]:
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail='Job not found')
     stop_flag = request_stop(job_id)
     rq_cancelled = cancel_rq_job(job_id)
-    # try to mark local thread if present
     t = job_threads.get(job_id)
     if t and not t.is_alive():
         job_threads.pop(job_id, None)
@@ -1157,6 +1166,16 @@ def stop_job(job_id: int):
     return {'id': job.id, 'status': 'failed', 'detail': '; '.join(detail_parts)}
 
 
+@app.post('/jobs/stop')
+def stop_job(job_id: int):
+    return _stop_job_common(job_id)
+
+
+@app.post('/jobs/{job_id}/stop')
+def stop_job_by_id(job_id: int):
+    return _stop_job_common(job_id)
+
+
 @app.post('/jobs/pause')
 def pause_job(job_id: int):
     job = get_job(job_id)
@@ -1166,18 +1185,49 @@ def pause_job(job_id: int):
     return {'id': job.id, 'status': 'paused', 'detail': 'Job marked as paused (requires manual restart)'}
 
 
+def _resume_job_snapshot(job_id: int) -> Dict[str, Any]:
+    snapshot = scheduler.resume_from_snapshot(job_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail='Snapshot not found or corrupted')
+    return {'job_id': job_id, 'snapshot': snapshot}
+
+
 @app.post('/jobs/resume')
 def resume_job(job_id: int):
-    job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail='Job not found')
-    # This only flips status; to truly resume a paused job, start a new job run as needed.
-    save_job_state(job_id, job.state or '', status='running')
-    return {'id': job.id, 'status': 'running', 'detail': 'Job status set to running (no automatic restart)'}
+    return _resume_job_snapshot(job_id)
+
+
+@app.post('/jobs/{job_id}/resume')
+def resume_job_by_id(job_id: int):
+    return _resume_job_snapshot(job_id)
 
 @app.post("/jobs/schedule")
-def schedule_job(query: str, interval_seconds: int = 3600):
-    entry = scheduler.add_schedule(query, interval_seconds)
+def schedule_job(
+    query: str,
+    interval_seconds: int = 3600,
+    name: str = None,
+    cron_expr: str = None,
+    iso_expr: str = None,
+    spec_type: str = None,
+    spec_expr: str = None,
+    max_retries: int = 3,
+    backoff_seconds: int = 60,
+):
+    spec: Optional[Dict[str, Any]] = None
+    if spec_type and spec_expr:
+        spec = {"type": spec_type, "expr": spec_expr}
+    elif cron_expr:
+        spec = {"type": "cron", "expr": cron_expr}
+    elif iso_expr:
+        spec = {"type": "iso", "expr": iso_expr}
+    entry = scheduler.add_schedule(
+        query=query,
+        spec=spec,
+        interval_seconds=interval_seconds,
+        name=name,
+        max_retries=max_retries,
+        backoff_seconds=backoff_seconds,
+    )
     return {"scheduled": entry}
 
 @app.get("/jobs/schedules")
@@ -1200,7 +1250,13 @@ async def run_due_schedules():
 
 
 @app.post('/jobs/{job_id}/retry')
-def retry_job(job_id: int, name: str = None, max_iterations: int = 5, max_duration_seconds: int = 300, max_token_budget: int = 0):
+def retry_job(
+    job_id: int,
+    name: str = None,
+    max_iterations: int = 5,
+    max_duration_seconds: int = 300,
+    max_token_budget: int = JOB_TOKEN_BUDGET,
+):
     """Create a new job using the query from an existing job state."""
     job = get_job(job_id)
     if not job:
@@ -1368,23 +1424,35 @@ def job_timeline(job_id: int):
         state = json.loads(job.state) if job.state else {}
     except Exception:
         state = {}
-
-    # Prefer explicit timeline if present
-    if 'timeline' in state and isinstance(state['timeline'], list):
-        return {'timeline': state['timeline']}
-
-    # Fallback: build timeline from council entries
-    timeline = []
-    council = state.get('council', {}) or {}
-    for k in sorted(council.keys()):
-        entry = council[k] or {}
-        timeline.append({
-            'iteration': k,
-            'summary': entry.get('summary') if isinstance(entry, dict) else entry,
-            'messages': entry.get('messages') if isinstance(entry, dict) else None,
-            'votes': entry.get('votes') if isinstance(entry, dict) else None,
-        })
+    timeline = build_typed_timeline(state)
     return {'timeline': timeline}
+
+
+@app.get('/jobs/{job_id}/metrics')
+def job_metrics(job_id: int):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail='Job not found')
+    try:
+        state = json.loads(job.state) if job.state else {}
+    except Exception:
+        state = {}
+    metrics = build_job_metrics(state)
+    return {
+        'job_id': job_id,
+        'name': job.name,
+        'status': job.status,
+        'metrics': metrics,
+    }
+
+
+@app.get('/jobs/{job_id}/decisions')
+def job_decisions(job_id: int, limit: int = 50):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail='Job not found')
+    decisions = read_decisions(job_id, limit=limit)
+    return {'job_id': job_id, 'decisions': decisions}
 
 
 @app.get('/jobs/board')

@@ -1,10 +1,11 @@
-from sqlmodel import SQLModel, Field, create_engine, Session, select
+from sqlmodel import SQLModel, Field, create_engine, Session, select, delete
 from typing import Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from app.core.config import DB_FILE
 from sqlalchemy import func
 import logging
 from app.core.logging_config import configure_logging
+import json
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -37,6 +38,37 @@ class Job(SQLModel, table=True):
     state: Optional[str] = None
     priority: int = Field(default=0)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ResearchSchedule(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    query: str
+    spec_type: str
+    spec_expr: str
+    spec_extra: Optional[str] = None
+    next_run: Optional[datetime] = None
+    last_run: Optional[datetime] = None
+    failures: int = Field(default=0)
+    max_retries: int = Field(default=3)
+    backoff_seconds: int = Field(default=60)
+    active: bool = Field(default=True)
+    last_error: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class WebCache(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    cache_key: str = Field(index=True)
+    query: str
+    lang: str = Field(default="fr")
+    safe_search: bool = Field(default=True)
+    engine_set: str
+    result_payload: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: Optional[datetime] = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 def init_db():
@@ -97,3 +129,60 @@ def db_job_status_counts():
     with get_session() as s:
         rows = s.exec(select(Job.status, func.count(Job.id)).group_by(Job.status)).all()
     return {status: count for status, count in rows}
+
+
+def get_web_cache_entry(cache_key: str) -> Optional[WebCache]:
+    now = datetime.now(timezone.utc)
+    with get_session() as s:
+        entry = s.exec(select(WebCache).where(WebCache.cache_key == cache_key)).first()
+        if not entry:
+            return None
+        exp_at = entry.expires_at
+        if exp_at:
+            if exp_at.tzinfo is None:
+                exp_at = exp_at.replace(tzinfo=timezone.utc)
+            if exp_at < now:
+                s.delete(entry)
+                s.commit()
+                return None
+        return entry
+
+
+def store_web_cache_entry(
+    cache_key: str,
+    query: str,
+    lang: str,
+    safe_search: bool,
+    engine_set: str,
+    result_payload: str,
+    expires_at: datetime,
+) -> WebCache:
+    now = datetime.now(timezone.utc)
+    with get_session() as s:
+        entry = s.exec(select(WebCache).where(WebCache.cache_key == cache_key)).first()
+        if not entry:
+            entry = WebCache(
+                cache_key=cache_key,
+                query=query,
+                lang=lang,
+                safe_search=safe_search,
+                engine_set=engine_set,
+                created_at=now,
+            )
+        entry.result_payload = result_payload
+        entry.expires_at = expires_at
+        entry.updated_at = now
+        s.add(entry)
+        s.commit()
+        s.refresh(entry)
+    return entry
+
+
+def cleanup_web_cache_entries(before: Optional[datetime] = None) -> int:
+    if before is None:
+        before = datetime.now(timezone.utc)
+    with get_session() as s:
+        stmt = delete(WebCache).where(WebCache.expires_at != None).where(WebCache.expires_at < before)
+        result = s.exec(stmt)
+        s.commit()
+    return result.rowcount if result is not None else 0

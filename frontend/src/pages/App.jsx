@@ -42,6 +42,13 @@ export default function App() {
   const [dashboardLoading, setDashboardLoading] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [diagnostic, setDiagnostic] = useState(null)
+  const [activePanel, setActivePanel] = useState('chat')
+  const [jobMetrics, setJobMetrics] = useState(null)
+  const [decisionLog, setDecisionLog] = useState([])
+  const [runsBoard, setRunsBoard] = useState([])
+  const [runsLoading, setRunsLoading] = useState(false)
+  const [runsFilterStatus, setRunsFilterStatus] = useState('all')
+  const [runsNameFilter, setRunsNameFilter] = useState('')
   const diagnosticItems = useMemo(() => {
     const diag = diagnostic?.diagnostic || {}
     const metrics = jobOverview?.run_metrics || {}
@@ -55,6 +62,15 @@ export default function App() {
     push('notes', diag.notes || diag.summary)
     return out
   }, [diagnostic, jobOverview])
+  const filteredRuns = useMemo(() => {
+    return runsBoard.filter((job) => {
+      const status = (job.status || '').toLowerCase()
+      const statusMatch = runsFilterStatus === 'all' ? true : status === runsFilterStatus
+      const searchTerm = runsNameFilter.trim().toLowerCase()
+      const nameMatch = !searchTerm || (job.name || '').toLowerCase().includes(searchTerm) || (job.last_note || '').toLowerCase().includes(searchTerm)
+      return statusMatch && nameMatch
+    })
+  }, [runsBoard, runsFilterStatus, runsNameFilter])
   const [pollingFallback, setPollingFallback] = useState(false)
   const [renameLoadingId, setRenameLoadingId] = useState(null)
   const [deleteLoadingId, setDeleteLoadingId] = useState(null)
@@ -222,6 +238,54 @@ export default function App() {
       sseRef.current = null
     }
   }, [activeJob?.job_id])
+
+  useEffect(() => {
+    if (!activeJob?.job_id || activePanel !== 'job-detail') {
+      setJobMetrics(null)
+      setDecisionLog([])
+      return
+    }
+    let cancelled = false
+    api
+      .jobMetrics(activeJob.job_id)
+      .then((res) => {
+        if (!cancelled) {
+          setJobMetrics(res.metrics)
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setError(`Metrics: ${e.message}`)
+      })
+    api
+      .jobDecisions(activeJob.job_id)
+      .then((res) => {
+        if (!cancelled) {
+          setDecisionLog(res.decisions || [])
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setError(`Decisions: ${e.message}`)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activeJob?.job_id, activePanel])
+
+  useEffect(() => {
+    if (activePanel !== 'runs-overview') return
+    setRunsLoading(true)
+    api
+      .jobsBoard()
+      .then((res) => {
+        setRunsBoard(res.jobs || [])
+      })
+      .catch((e) => {
+        setError(`Agenda: ${e.message}`)
+      })
+      .finally(() => {
+        setRunsLoading(false)
+      })
+  }, [activePanel])
 
   const loadJobs = async () => {
     try {
@@ -439,6 +503,22 @@ export default function App() {
     }
   }
 
+  const refreshJobDetailData = async () => {
+    if (!activeJob?.job_id) return
+    try {
+      const res = await api.jobMetrics(activeJob.job_id)
+      setJobMetrics(res.metrics)
+    } catch (err) {
+      setError(err.message)
+    }
+    try {
+      const res = await api.jobDecisions(activeJob.job_id)
+      setDecisionLog(res.decisions || [])
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-foreground">
       <div className="flex h-screen">
@@ -538,8 +618,36 @@ export default function App() {
               <button className="btn-secondary" onClick={() => setShowPromptDialog(true)}>Prompt</button>
             </div>
           </header>
+          <div className="flex items-center justify-between px-4 py-2 border-b border-border text-xs text-muted-foreground">
+            <div className="flex gap-2">
+              {[
+                { key: 'chat', label: 'Chat' },
+                { key: 'job-detail', label: 'Job détails' },
+                { key: 'runs-overview', label: 'Runs overview' },
+              ].map((view) => (
+                <button
+                  key={view.key}
+                  onClick={() => setActivePanel(view.key)}
+                  className={`rounded-full px-3 py-1 transition ${
+                    activePanel === view.key ? 'bg-primary text-white' : 'bg-background/50 text-muted-foreground ring-1 ring-border'
+                  }`}
+                >
+                  {view.label}
+                </button>
+              ))}
+            </div>
+            <div className="text-[11px] text-muted-foreground">
+              {activePanel === 'job-detail' && jobMetrics
+                ? `sources: ${jobMetrics.unique_sources}`
+                : activePanel === 'runs-overview'
+                  ? `${runsBoard.length} jobs chargés`
+                  : ''}
+            </div>
+          </div>
 
           <main className="relative flex-1 overflow-auto px-4 py-3 space-y-4">
+            {activePanel === 'chat' ? (
+              <>
             <section className="grid gap-3 md:grid-cols-3">
               <div className="rounded-2xl border border-border bg-card p-3 text-sm">
                 <div className="flex items-center justify-between">
@@ -742,9 +850,173 @@ export default function App() {
                 )}
               </div>
             </section>
+              </>
+            ) : activePanel === 'job-detail' ? (
+              <div className="space-y-4">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="rounded-2xl border border-border bg-card p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <h2 className="text-sm font-semibold">Scores de recherche</h2>
+                      <button className="btn-ghost text-xs" onClick={refreshJobDetailData}>Rafraîchir</button>
+                    </div>
+                    {(jobMetrics?.research_score && Object.keys(jobMetrics.research_score).length) ? (
+                      <div className="space-y-3">
+                        {['coherence', 'coverage', 'robustness', 'novelty'].map((key) => {
+                          const value = jobMetrics.research_score[key]
+                          const normalized = typeof value === 'number' ? Math.max(0, Math.min(1, value)) : 0
+                          return (
+                            <div key={key} className="space-y-1">
+                              <div className="flex justify-between text-[11px] uppercase tracking-wide text-muted-foreground">
+                                <span>{key}</span>
+                                <span>{typeof value === 'number' ? value.toFixed(2) : '--'}</span>
+                              </div>
+                              <div className="h-2 rounded-full bg-border">
+                                <div className="h-2 rounded-full bg-emerald-400" style={{ width: `${normalized * 100}%` }} />
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">Les métriques sont en attente.</p>
+                    )}
+                  </div>
+                  <div className="rounded-2xl border border-border bg-card p-4 text-sm space-y-2">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-sm font-semibold">Usage</h2>
+                      <span className="text-xs text-muted-foreground">{jobMetrics?.mode || 'mode inconnu'}</span>
+                    </div>
+                    <div>Tokens: {jobMetrics?.tokens_spent ?? '–'}</div>
+                    <div>Sources uniques: {jobMetrics?.unique_sources ?? '–'}</div>
+                    <div>Iterations observées: {jobMetrics?.timeline_length ?? '–'}</div>
+                    {jobMetrics?.avg_iteration_duration != null && (
+                      <div>Durée moyenne itération: {jobMetrics.avg_iteration_duration.toFixed(1)}s</div>
+                    )}
+                    <div>Mode convergence: {jobMetrics?.mode || '–'}</div>
+                    <div className="text-xs text-muted-foreground">Stagnation: {jobMetrics?.stagnation_reason || 'pas de signal'}</div>
+                  </div>
+                </div>
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold">Topologie de la connaissance</h2>
+                    <button className="btn-ghost text-xs" onClick={refreshJobDetailData}>Recharger</button>
+                  </div>
+                  <div className="grid gap-3">
+                    {(jobMetrics?.run_context?.timeline || timeline).slice(-3).map((entry, idx) => (
+                      <TimelineCard key={`detail-${idx}`} entry={entry} />
+                    ))}
+                  </div>
+                </section>
+                <section className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold">Décisions</h2>
+                    <span className="text-xs text-muted-foreground">{decisionLog.length} entrées</span>
+                  </div>
+                  <div className="space-y-2">
+                    {decisionLog.length ? (
+                      decisionLog.map((dec, idx) => (
+                        <div key={`dec-${idx}`} className="rounded-xl border border-border bg-card p-3 text-sm space-y-1">
+                          <div className="flex items-center justify-between text-xs text-muted-foreground">
+                            <span>Iter {dec.iteration ?? idx + 1}</span>
+                            <span>Votes: {(dec.votes || []).length}</span>
+                          </div>
+                          <div className="text-sm text-foreground whitespace-pre-wrap">
+                            {dec.summary || 'Pas de synthèse enregistrée.'}
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-sm text-muted-foreground">Aucune décision enregistrée.</p>
+                    )}
+                  </div>
+                </section>
+                <section className="space-y-3">
+                  <h2 className="text-sm font-semibold">Profil d'itérations</h2>
+                  <div className="grid gap-2">
+                    {(jobMetrics?.iteration_profile || []).slice(-5).map((profile, idx) => (
+                      <div key={`profile-${idx}`} className="rounded-xl border border-border bg-card p-3 text-sm space-y-1">
+                        <div className="flex justify-between text-xs text-muted-foreground">
+                          <span>Itération {profile.iteration || idx + 1}</span>
+                          {profile.duration_sec != null && <span>{profile.duration_sec.toFixed(1)}s</span>}
+                        </div>
+                        <div className="text-sm text-foreground">{profile.summary || 'Résumé absent'}</div>
+                        <div className="text-xs text-muted-foreground">Type: {profile.type || '—'}</div>
+                      </div>
+                    ))}
+                    {!jobMetrics?.iteration_profile?.length && <p className="text-sm text-muted-foreground">Temps d'attente des données.</p>}
+                  </div>
+                </section>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex flex-wrap gap-2">
+                    <select
+                      className="rounded-xl border border-border bg-card px-3 py-2 text-xs text-foreground"
+                      value={runsFilterStatus}
+                      onChange={(e) => setRunsFilterStatus(e.target.value)}
+                    >
+                      <option value="all">Tous les statuts</option>
+                      <option value="running">running</option>
+                      <option value="completed">completed</option>
+                      <option value="failed">failed</option>
+                      <option value="deleted">deleted</option>
+                    </select>
+                    <input
+                      className="rounded-xl border border-border bg-card px-3 py-2 text-xs text-foreground"
+                      placeholder="Filtrer par nom ou note"
+                      value={runsNameFilter}
+                      onChange={(e) => setRunsNameFilter(e.target.value)}
+                    />
+                  </div>
+                  <button
+                    className="btn-secondary text-xs px-4 py-1"
+                    onClick={() => setActivePanel('runs-overview')}
+                    disabled={runsLoading}
+                  >
+                    {runsLoading ? '...' : 'Rafraîchir'}
+                  </button>
+                </div>
+                <div className="grid gap-3">
+                  {runsLoading ? (
+                    <p className="text-sm text-muted-foreground">Chargement des jobs...</p>
+                  ) : filteredRuns.length ? (
+                    filteredRuns.map((job) => (
+                      <div key={`run-${job.id}`} className="rounded-2xl border border-border bg-card p-3 text-sm space-y-1">
+                        <div className="flex items-center justify-between text-xs uppercase tracking-wide text-muted-foreground">
+                          <span># {job.id}</span>
+                          <span>{job.status}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <p className="font-semibold">{job.name}</p>
+                          <button
+                            className="btn-ghost text-xs"
+                            onClick={() => {
+                              handleSelectJob({ id: job.id, name: job.name })
+                              setActivePanel('job-detail')
+                            }}
+                          >
+                            Voir
+                          </button>
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {job.last_event || 'Aucun événement récent'} · {job.last_note || '—'}
+                        </div>
+                        <div className="text-[11px] text-muted-foreground">
+                          Mis à jour: {job.updated_at ? new Date(job.updated_at).toLocaleString() : '—'}
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Aucun job correspondant.</p>
+                  )}
+                </div>
+              </div>
+            )}
           </main>
 
-          <footer className="border-t border-border bg-background/80 backdrop-blur px-4 py-3">
+          {activePanel === 'chat' && (
+            <footer className="border-t border-border bg-background/80 backdrop-blur px-4 py-3">
             {error && <div className="mb-2 text-sm text-red-400">{error}</div>}
             <form onSubmit={handleSend} className="flex items-center gap-2">
               <input
@@ -757,7 +1029,8 @@ export default function App() {
                 Envoyer
               </button>
             </form>
-          </footer>
+            </footer>
+          )}
         </div>
       </div>
 
