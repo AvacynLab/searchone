@@ -203,6 +203,21 @@ def _extract_knowledge_topology(job_state: Dict[str, Any]) -> Dict[str, Any]:
                 break
     if stats and exports:
         stats.setdefault("exports", exports)
+    if stats:
+        desc_parts: List[str] = []
+        if stats.get("node_count") is not None:
+            desc_parts.append(f"{stats['node_count']} nœuds")
+        if stats.get("edge_count") is not None:
+            desc_parts.append(f"{stats['edge_count']} arêtes")
+        if stats.get("component_count") is not None:
+            desc_parts.append(f"{stats['component_count']} composantes")
+        hubs = stats.get("hubs") or []
+        if hubs:
+            hub_names = ", ".join(f"{hub.get('node')} ({hub.get('degree')})" for hub in hubs[:3] if hub.get("node"))
+            if hub_names:
+                stats.setdefault("top_hubs_summary", hub_names)
+        if desc_parts:
+            stats.setdefault("description", "Topologie du graphe de connaissances: " + ", ".join(desc_parts))
     return stats
 
 
@@ -249,6 +264,8 @@ def build_structured_summary(job_state: Dict[str, Any]) -> Dict[str, Any]:
     recommendations = recommendations[-3:]
     figures = _extract_figures_from_evidence(evidence)
     knowledge_topology = _extract_knowledge_topology(job_state)
+    kg_stats = job_state.get("knowledge_graph_stats") or {}
+    kg_exports = job_state.get("knowledge_graph_exports") or []
     return {
         "hypotheses": hypotheses,
         "evidence": evidence,
@@ -257,6 +274,7 @@ def build_structured_summary(job_state: Dict[str, Any]) -> Dict[str, Any]:
         "notes": notes,
         "figures": figures,
         "knowledge_topology": knowledge_topology,
+        "knowledge_graph": {"stats": kg_stats, "exports": kg_exports},
     }
 
 

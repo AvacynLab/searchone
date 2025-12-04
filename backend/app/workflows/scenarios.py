@@ -4,15 +4,19 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import logging
 import yaml
 from pydantic import BaseModel, Field, validator
 
 from app.core.config import BACKEND_ROOT
 from app.core.logging_config import configure_logging
+from app.workflows.agents import TOOL_WHITELIST
 
 configure_logging()
+logger = logging.getLogger(__name__)
 
 SCENARIOS_PATH = (BACKEND_ROOT.parent / "configs" / "research_scenarios.yaml").resolve()
+KNOWN_TOOLS = set(TOOL_WHITELIST)
 
 
 class PhaseSpec(BaseModel):
@@ -81,6 +85,14 @@ def load_scenarios(path: Optional[Path] = None) -> Dict[str, ScenarioSpec]:
             spec = ScenarioSpec(name=name, **entry)
         except Exception:
             continue
+        invalid_tools = []
+        for phase in spec.phases:
+            for tool in phase.tools:
+                if tool not in KNOWN_TOOLS:
+                    invalid_tools.append(tool)
+        if invalid_tools:
+            logger.warning("Scenario %s references unknown tools: %s", name, invalid_tools)
+            raise ValueError(f"Unknown tool names in scenario '{name}': {invalid_tools}")
         scenarios[name] = spec
     return scenarios
 

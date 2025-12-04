@@ -47,18 +47,27 @@ def _collect_figures(state: Dict[str, Any]) -> List[Dict[str, Any]]:
                 meta = ev.get("meta") or {}
                 if meta.get("source_type") != "plot":
                     continue
-                title = meta.get("figure", {}).get("title") or ev.get("text") or "figure"
-                path = meta.get("path") or meta.get("figure", {}).get("path")
+                figure_meta = meta.get("figure") or {}
+                path = figure_meta.get("path") or meta.get("path")
+                title = figure_meta.get("title") or ev.get("text") or "figure"
                 key = path or title
                 if not key or key in seen:
                     continue
                 seen.add(key)
+                vectors = figure_meta.get("vector_paths") or {}
                 figures.append(
                     {
                         "title": title,
-                        "description": meta.get("figure", {}).get("description"),
+                        "description": figure_meta.get("description"),
+                        "caption": figure_meta.get("description"),
+                        "variables": figure_meta.get("variables"),
+                        "plot_type": figure_meta.get("plot_type"),
+                        "generated_at": figure_meta.get("generated_at"),
                         "path": path,
-                        "vectors": meta.get("vectors") or {},
+                        "svg_path": figure_meta.get("svg_path"),
+                        "source": figure_meta.get("metadata", {}).get("source") or meta.get("source"),
+                        "vectors": vectors,
+                        "metadata": figure_meta.get("metadata"),
                     }
                 )
     return figures
@@ -125,6 +134,21 @@ def build_scientific_article(
     claims = summaries.get("hypotheses") or _collect_hypotheses(job_state)
     evidence_texts = summaries.get("evidence_texts") or _collect_evidence_texts(job_state)
     figures = summaries.get("figures") or _collect_figures(job_state)
+    knowledge_graph_exports = job_state.get("knowledge_graph_exports") or []
+    existing_paths = {fig.get("path") for fig in figures if fig.get("path")}
+    for export in knowledge_graph_exports:
+        export_path = export.get("path") or export.get("dot_path")
+        if not export_path or export_path in existing_paths:
+            continue
+        existing_paths.add(export_path)
+        figures.append(
+            {
+                "title": export.get("description") or f"Graphe de connaissances ({export.get('format')})",
+                "description": export.get("description") or "Graph-export généré par knowledge_graph_tool.",
+                "path": export_path,
+                "metadata": export,
+            }
+        )
     topic = job_state.get("query") or "Recherche scientifique"
 
     outline_generator = OutlineGenerator()
@@ -180,6 +204,35 @@ def build_scientific_article(
         claims,
         job_state.get("run_metrics") or {},
     )
+
+    kg_stats = job_state.get("knowledge_graph_stats") or {}
+    if kg_stats:
+        nodes = kg_stats.get("node_count", 0)
+        edges = kg_stats.get("edge_count", 0)
+        components = kg_stats.get("component_count", 0)
+        hubs = kg_stats.get("hubs") or []
+        hubs_text = ", ".join(f"{hub.get('node')} ({hub.get('degree')})" for hub in hubs[:3] if hub.get("node"))
+        graph_paragraph = f"Structure du graphe de connaissances utilisé: {nodes} nœuds, {edges} liens, {components} composantes."
+        if hubs_text:
+            graph_paragraph += f" Hubs dominants: {hubs_text}."
+        target_section = None
+        for section in sections_output:
+            title = section.get("title", "").lower()
+            if "discussion" in title or "méthod" in title or "method" in title:
+                target_section = section
+                break
+        if target_section:
+            body_text = target_section.get("body", "") or ""
+            separator = "\n" if body_text else ""
+            target_section["body"] = f"{body_text}{separator}\n{graph_paragraph}".strip()
+        else:
+            sections_output.append(
+                {
+                    "title": "Topologie du graphe de connaissances",
+                    "body": graph_paragraph,
+                    "citations": [],
+                }
+            )
 
     return {
         "title": topic,

@@ -32,3 +32,31 @@ Ces variables sont reprises automatiquement par la configuration (`app.core.conf
 4. **Tests automatisés** : une suite ciblée (plot_tools, graph_tools, scénarios, writing pipeline, scheduler/cache) garantit les briques supplémentaires ; les tests E2E restent à compléter pour couvrir les cas `quick_literature_review` et la résistance SearxNG.
 
 Ces éléments évoluent au fil des itérations ; ce fichier sert de point de référence pour les développeurs qui reprennent un job ou cherchent à ajuster un scénario particulier.
+## Outils avancés
+
+Les outils plot_tool et knowledge_graph_tool permettent de générer des figures et des graphes de connaissances directement depuis les agents :
+
+* **plot_tool** produit des PNG/SVG à partir de séries {x, y, label, yerr} et expose plot_type, description, ariables, ector_formats. Chaque preuve est annotée avec meta.source_type= plot dans la timeline pour être reprise ensuite par les rapports/figures.
+* **knowledge_graph_tool** reconstruit le graphe des claims/promotions/pollutions, calcule des métriques (
+odes, edges, components, hubs) via graph_stats, exporte PNG/DOT via export_graphviz et renseigne state[knowledge_graph_stats] / state[knowledge_graph_exports]. Les rapports mentionnent la topologie sous Topologie du graphe de connaissances.
+
+## Exemple de scénario illustratif
+
+`yaml
+scenarios:
+  figures_and_graphs:
+    objective: Valider une hypothèse avec statistiques figures et graphes de connaissances.
+    phases:
+      - name: analysis
+        description: Générer des statistiques et figures.
+        agents: [Analyst, Experimenter]
+        tools: [stats_summary, plot_tool, web_search_tool]
+        max_iterations: 3
+      - name: synthesis
+        description: Construire le graphe de connaissances.
+        agents: [Analyst, Critic]
+        tools: [knowledge_graph_tool, search_semantic]
+        max_iterations: 2
+`
+
+La phase nalysis produit les figures, et synthesis capture la structure du savoir via le graphe exporté.

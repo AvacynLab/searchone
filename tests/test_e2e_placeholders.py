@@ -1,8 +1,8 @@
 import pytest
 
-from runtime import MessageBus
-from coordinator_actions import evaluate_replan
-from workflow import (
+from app.workflows.runtime import MessageBus
+from app.workflows.coordinator_actions import evaluate_replan
+from app.workflows.workflow import (
     WorkflowEngine,
     build_collect_subpipeline,
     build_full_research_pipeline,

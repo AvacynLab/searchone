@@ -47,6 +47,8 @@ from app.services.research_score import ResearchScore
 from app.workflows.debate import DebateRound, tally_votes, run_debate
 from app.services.writing import OutlineGenerator, SectionWriter, StyleCritic, FinalComposer, GlobalCritic
 from app.services.reporting import build_diagnostic
+from app.services.graph_tools import build_knowledge_graph, graph_stats, export_graphviz
+from app.services.plot_tools import generate_plot
 from app.core.tracing import start_span
 from app.services.references import ReferenceManager
 env_simple = os.getenv("SEARCHONE_SIMPLE_EMBEDDER")
@@ -139,11 +141,11 @@ _cross_encoder = None
 ROLE_ALLOWED_TOOLS = {
     "Explorer": {"web_search_tool", "fetch_and_parse_url", "search_hybrid", "search_vector", "search_semantic", "web_cache_lookup"},
     "Curator": {"search_hybrid", "search_vector", "search_semantic", "web_cache_lookup"},
-    "Analyst": {"search_semantic", "search_vector", "stats_summary", "correlation_matrix", "ttest_independent", "simplify_expression", "solve_equation", "web_cache_lookup"},
-    "Experimenter": {"run_experiment", "stats_summary", "ttest_independent", "simplify_expression", "web_cache_lookup"},
-    "Coordinator": {"web_cache_lookup"},
-    "Critic": {"search_semantic", "search_vector", "web_cache_lookup"},
-    "Redacteur": {"web_cache_lookup"},
+    "Analyst": {"search_semantic", "search_vector", "stats_summary", "correlation_matrix", "ttest_independent", "simplify_expression", "solve_equation", "plot_tool", "knowledge_graph_tool", "web_cache_lookup"},
+    "Experimenter": {"run_experiment", "stats_summary", "ttest_independent", "simplify_expression", "plot_tool", "web_cache_lookup"},
+    "Coordinator": {"web_cache_lookup", "knowledge_graph_tool"},
+    "Critic": {"search_semantic", "search_vector", "knowledge_graph_tool", "web_cache_lookup"},
+    "Redacteur": {"web_cache_lookup", "plot_tool"},
 }
 TOOLS = [
     {
@@ -182,6 +184,101 @@ TOOLS = [
             "name": "sources_summary",
             "description": "Recupere un resume des sources ingerees (top domaines, docs recents, fiabilite).",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "plot_tool",
+            "description": "Genere des figures (courbes, barres, histogrammes) a partir de series numeriques pour illustrer le raisonnement.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "integer", "description": "Identifiant de travail organise pour la figure"},
+                    "series": {
+                        "type": "array",
+                        "description": "Series de donnees a tracer",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "x": {"type": "array", "items": {"type": "number"}},
+                                "y": {"type": "array", "items": {"type": "number"}, "description": "Valeurs a tracer"},
+                                "label": {"type": "string"},
+                                "yerr": {"type": "array", "items": {"type": "number"}},
+                                "color": {"type": "string"},
+                                "style": {"type": "string"},
+                            },
+                            "required": ["y"],
+                        },
+                    },
+                    "plot_type": {
+                        "type": "string",
+                        "enum": ["line", "scatter", "bar", "hist"],
+                        "default": "line",
+                    },
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "x_label": {"type": "string"},
+                    "y_label": {"type": "string"},
+                    "variables": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Liste des variables representées par la figure",
+                    },
+                    "bins": {"type": "integer", "minimum": 1},
+                    "grid": {"type": "boolean"},
+                    "legend": {"type": "boolean"},
+                    "scale": {
+                        "type": "object",
+                        "properties": {
+                            "x": {"type": "string", "enum": ["linear", "log", "symlog"]},
+                            "y": {"type": "string", "enum": ["linear", "log", "symlog"]},
+                        },
+                    },
+                    "log_scale": {
+                        "description": "Active le zoom log si true (y-axis). Peut aussi etre un objet {x:..., y:...}.",
+                        "oneOf": [
+                            {"type": "boolean"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "x": {"type": "string", "enum": ["linear", "log", "symlog"]},
+                                    "y": {"type": "string", "enum": ["linear", "log", "symlog"]},
+                                },
+                            },
+                        ],
+                    },
+                    "vector_format": {
+                        "description": "Format vectoriel additionnel (svg, pdf)",
+                        "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                    },
+                    "vector_formats": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["svg", "pdf"]},
+                    },
+                },
+                "required": ["series"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "knowledge_graph_tool",
+            "description": "Construit un graphe de connaissances à partir des claims/promotions/pollutions persistés et expose ses métriques + export PNG.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "integer", "description": "Identifiant du job cible (facultatif)."},
+                    "scope": {
+                        "type": "string",
+                        "enum": ["current_job", "global"],
+                        "default": "current_job",
+                        "description": "Choix du périmètre des données (courant vs global).",
+                    },
+                },
+            },
         },
     },
     {
@@ -1067,7 +1164,22 @@ class Council:
         return {"summary": summary, "messages": msgs, "votes": votes}
 
 
-async def run_agents_job(job_id: int, query: str, max_iterations: int = 5, roles: List[str] = None, llm_client: LLMClient = None, embedder: SentenceTransformer = None, vs: FaissStore = None, max_duration_seconds: int = 300, max_token_budget: int = 0, bus: MessageBus = None, run_ctx: RunContext = None, controller: ConvergenceController = None):
+async def run_agents_job(
+    job_id: int,
+    query: str,
+    max_iterations: int = 5,
+    roles: List[str] = None,
+    llm_client: LLMClient = None,
+    embedder: SentenceTransformer = None,
+    vs: FaissStore = None,
+    max_duration_seconds: int = 300,
+    max_token_budget: int = 0,
+    bus: MessageBus = None,
+    run_ctx: RunContext = None,
+    controller: ConvergenceController = None,
+    tool_allowlist: Optional[List[str]] = None,
+    phase_meta: Optional[Dict[str, Any]] = None,
+):
     roles = roles or DEFAULT_ROLES
     logger.info("Starting agents job %s with roles %s", job_id, roles)
     # Always create a fresh LLM client per run to avoid stale semaphores / event loops
@@ -1113,6 +1225,7 @@ async def run_agents_job(job_id: int, query: str, max_iterations: int = 5, roles
     agents = []
     agent_specs: List[AgentSpec] = []
     high_risk = is_high_risk(query)
+    allowlist_set = set(tool_allowlist or [])
     for i in range(len(roles)):
         role = roles[i % len(roles)]
         model_id = resolve_model(role)
@@ -1121,7 +1234,11 @@ async def run_agents_job(job_id: int, query: str, max_iterations: int = 5, roles
         agent.state["model"] = model_id
         agent.bus = bus
         base_tools = ROLE_ALLOWED_TOOLS.get(role, TOOL_WHITELIST)
-        agent.allowed_tools = set(filter_tools(base_tools, allow_web=not high_risk))
+        allowed_tools = set(filter_tools(base_tools, allow_web=not high_risk))
+        if tool_allowlist:
+            allowed_tools &= allowlist_set
+        agent.allowed_tools = allowed_tools
+        agent.state["tool_allowlist"] = tool_allowlist
         spec = AgentSpec(
             name=agent.name,
             role_description=role,
@@ -1144,6 +1261,8 @@ async def run_agents_job(job_id: int, query: str, max_iterations: int = 5, roles
         "web_requests": 0,
         "usage": {},
         "agent_specs": [spec.to_dict() for spec in agent_specs],
+        "tool_allowlist": tool_allowlist,
+        "phase_meta": phase_meta,
     }
     for agent in agents:
         agent.job_state = state
@@ -1756,6 +1875,22 @@ async def fetch_and_parse_url(url: str) -> Tuple[str, Dict[str, Any]]:
 
 
 async def _execute_tool(name: str, args: Dict[str, Any], agent: Agent) -> List[Dict[str, Any]]:
+    agent_state = getattr(agent, "state", {}) or {}
+    phase_allowlist = agent_state.get("tool_allowlist")
+    if phase_allowlist is not None:
+        allowlist_set = set(phase_allowlist)
+        if name not in allowlist_set:
+            logger.info(
+                "tool_call.blocked_by_allowlist",
+                extra={"agent": getattr(agent, "name", "?"), "tool": name, "role": getattr(agent, "role", "?")},
+            )
+            return [
+                {
+                    "score": None,
+                    "text": f"L'outil '{name}' n'est pas autorisé dans cette phase.",
+                    "meta": {"source_type": "tool_block", "reason": "tool_not_allowed", "tool": name},
+                }
+            ]
     allowed = getattr(agent, "allowed_tools", None)
     if allowed is not None and name not in allowed:
         logger.info("tool_call.blocked_by_role", extra={"agent": getattr(agent, "name", "?"), "tool": name, "role": getattr(agent, "role", "?")})
@@ -1786,6 +1921,117 @@ async def _execute_tool(name: str, args: Dict[str, Any], agent: Agent) -> List[D
         except Exception as e:
             logger.warning("sources_summary tool failed: %s", e)
             return []
+    if name == "plot_tool":
+        raw_series = args.get("series")
+        if not raw_series:
+            return []
+        plot_type = args.get("plot_type") or "line"
+        job_ref = args.get("job_id") or getattr(agent, "job_id", None)
+        scale = dict(args.get("scale") or {})
+        log_scale = args.get("log_scale")
+        if isinstance(log_scale, dict):
+            scale.update({k: v for k, v in log_scale.items() if v})
+        elif isinstance(log_scale, bool):
+            if log_scale:
+                scale.setdefault("y", "log")
+        elif isinstance(log_scale, str):
+            axis = log_scale.lower()
+            if axis == "x":
+                scale["x"] = "log"
+            elif axis == "both":
+                scale["x"] = "log"
+                scale["y"] = "log"
+            else:
+                scale["y"] = "log"
+        spec = {
+            "job_id": job_ref,
+            "type": plot_type,
+            "title": args.get("title"),
+            "description": args.get("description"),
+            "x_label": args.get("x_label"),
+            "y_label": args.get("y_label"),
+            "variables": args.get("variables") or args.get("fields"),
+            "bins": args.get("bins"),
+            "grid": args.get("grid"),
+            "legend": args.get("legend"),
+            "vector_formats": args.get("vector_formats"),
+            "vector_format": args.get("vector_format"),
+            "scale": scale or None,
+            "context": {"job_id": job_ref} if job_ref else None,
+        }
+        series = raw_series
+        if isinstance(raw_series, dict):
+            series = [raw_series]
+        try:
+            artifact = generate_plot(data=series, spec={k: v for k, v in spec.items() if v is not None})
+        except Exception as e:
+            logger.warning("plot_tool generation failed: %s", e, exc_info=True)
+            return []
+        figure_meta = artifact.metadata or {}
+        title = figure_meta.get("title") or args.get("title") or f"{plot_type} plot"
+        svg_path = artifact.vector_paths.get("svg")
+        vectors = {fmt: str(path) for fmt, path in artifact.vector_paths.items()}
+        evidence_meta = {
+            "source_type": "plot",
+            "figure": {
+                "path": str(artifact.png_path),
+                "svg_path": str(svg_path) if svg_path else None,
+                "title": title,
+                "plot_type": plot_type,
+                "description": figure_meta.get("description") or args.get("description"),
+                "variables": figure_meta.get("variables"),
+                "series": figure_meta.get("series"),
+                "generated_at": figure_meta.get("generated_at"),
+                "metadata": figure_meta,
+                "vector_paths": vectors or None,
+            },
+            "tool": "plot_tool",
+        }
+        evidence = {
+            "score": None,
+            "text": f"Figure générée: {title}",
+            "meta": evidence_meta,
+        }
+        job_state = getattr(agent, "job_state", None)
+        if job_state is not None:
+            job_state.setdefault("evidence", []).append(evidence)
+        return [evidence]
+    if name == "knowledge_graph_tool":
+        job_ref = args.get("job_id") or getattr(agent, "job_id", None)
+        scope = args.get("scope") or "current_job"
+        graph_job = job_ref if scope == "current_job" else None
+        graph = build_knowledge_graph(job_id=graph_job)
+        stats = graph_stats(graph)
+        exports = export_graphviz(graph, job_id=job_ref)
+        summary_parts = [
+            f"{stats.get('node_count', 0)} nœuds",
+            f"{stats.get('edge_count', 0)} arêtes",
+            f"{stats.get('component_count', 0)} composantes",
+        ]
+        summary = f"Graphe de connaissances généré ({', '.join(summary_parts)})."
+        if exports.get("png"):
+            summary += f" PNG: {exports['png']}."
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        job_state = getattr(agent, "job_state", None)
+        if job_state is not None:
+            job_state["knowledge_graph_stats"] = stats
+            export_entries = []
+            png_path = exports.get("png")
+            if png_path:
+                export_entries.append({"format": "png", "path": png_path, "created_at": now})
+            dot_path = exports.get("dot")
+            if dot_path:
+                export_entries.append({"format": "dot", "path": dot_path, "created_at": now})
+            if export_entries:
+                job_state.setdefault("knowledge_graph_exports", []).extend(export_entries)
+        meta = {
+            "source_type": "knowledge_graph",
+            "stats": stats,
+            "exports": exports,
+            "scope": scope,
+            "job_id": graph_job,
+        }
+        return [{"score": None, "text": summary, "meta": meta}]
     if name == "ingest_async":
         try:
             urls = args.get("urls") or []

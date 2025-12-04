@@ -2,11 +2,11 @@ import asyncio
 from pathlib import Path
 import json
 
-from workflow import build_full_research_pipeline, WorkflowEngine, execute_actions_from_bus
-from debate import tally_votes
-from scheduler import ResearchScheduler, SCHEDULES_FILE
-from references import ReferenceManager
-from runtime import MessageBus
+from app.workflows.workflow import build_full_research_pipeline, WorkflowEngine, execute_actions_from_bus
+from app.workflows.debate import tally_votes
+from app.workflows.scheduler import ResearchScheduler, SCHEDULES_FILE
+from app.services.references import ReferenceManager
+from app.workflows.runtime import MessageBus
 
 
 def test_workflow_full_pipeline_produces_decision():
@@ -32,7 +32,7 @@ def test_debate_tally_weighted_and_veto():
 
 
 def test_scheduler_run_due(tmp_path, monkeypatch):
-    monkeypatch.setattr("scheduler.SCHEDULES_FILE", tmp_path / "schedules.json")
+    monkeypatch.setattr("app.workflows.scheduler.SCHEDULES_FILE", tmp_path / "schedules.json")
     sched = ResearchScheduler(snapshot_dir=tmp_path)
     sched.add_schedule("test query", interval_seconds=-1)
     launched = []
